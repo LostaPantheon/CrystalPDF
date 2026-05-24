@@ -53,6 +53,8 @@ def _enable_dpi_awareness():
 
 _enable_dpi_awareness()
 
+DEFAULT_BRIGHTNESS = 0
+DEFAULT_CONTRAST = 100
 DEFAULT_EDGE_MARGIN = 5
 DESKTOP_SHORTCUT_NAME = "CrystalPDF"
 LEGACY_DESKTOP_SHORTCUT_NAMES = ("Mini_Icon_CrystalPDF",)
@@ -297,6 +299,8 @@ class PdfCleanerApp(tk.Tk):
 
         # Цветные страницы {индекс_страницы: да/нет}
         self._color_pages = {}
+        self._page_adjustments = {}
+        self._loading_page_adjustments = False
         self._crop_boxes = {}
         self._crop_start = None
         self._crop_preview_id = None
@@ -778,8 +782,8 @@ class PdfCleanerApp(tk.Tk):
         self.margin_var  = tk.IntVar(value=DEFAULT_EDGE_MARGIN)
         self.thresh_var  = tk.IntVar(value=60)
         self.angle_var   = tk.IntVar(value=10)
-        self.brightness_var = tk.IntVar(value=0)
-        self.contrast_var   = tk.IntVar(value=100)
+        self.brightness_var = tk.IntVar(value=DEFAULT_BRIGHTNESS)
+        self.contrast_var   = tk.IntVar(value=DEFAULT_CONTRAST)
 
         make_slider(par_sec, "Размер точки (px)",
                     self.dot_var, 1, 100,
@@ -1244,6 +1248,7 @@ class PdfCleanerApp(tk.Tk):
             "crop_boxes": dict(self._crop_boxes),
             "page_status": dict(self._page_status),
             "color_pages": dict(self._color_pages),
+            "page_adjustments": {k: dict(v) for k, v in self._page_adjustments.items()},
         }
 
     def _restore_document_state(self, state):
@@ -1271,6 +1276,9 @@ class PdfCleanerApp(tk.Tk):
         self._crop_boxes = dict(state.get("crop_boxes", {}))
         self._page_status = dict(state.get("page_status", {}))
         self._color_pages = dict(state.get("color_pages", {}))
+        self._page_adjustments = {
+            k: dict(v) for k, v in state.get("page_adjustments", {}).items()
+        }
         self._pan_x = 0
         self._pan_y = 0
         self._pan_anchor = None
@@ -1293,6 +1301,7 @@ class PdfCleanerApp(tk.Tk):
         self._crop_boxes = shifted(self._crop_boxes)
         self._page_status = shifted(self._page_status)
         self._color_pages = shifted(self._color_pages)
+        self._page_adjustments = shifted(self._page_adjustments)
         for idx in range(start, start + count):
             self._page_status[idx] = "waiting"
             self._color_pages[idx] = False
@@ -1313,10 +1322,12 @@ class PdfCleanerApp(tk.Tk):
         self._crop_boxes = shifted(self._crop_boxes)
         self._page_status = shifted(self._page_status)
         self._color_pages = shifted(self._color_pages)
+        self._page_adjustments = shifted(self._page_adjustments)
 
     def _shift_page_state_for_replace(self, start, new_count):
         delta = new_count - 1
         old_color = self._color_pages.get(start, False)
+        old_adjustment = dict(self._page_adjustments.get(start, {}))
 
         def shifted(mapping):
             out = {}
@@ -1331,9 +1342,12 @@ class PdfCleanerApp(tk.Tk):
         self._crop_boxes = shifted(self._crop_boxes)
         self._page_status = shifted(self._page_status)
         self._color_pages = shifted(self._color_pages)
+        self._page_adjustments = shifted(self._page_adjustments)
         for idx in range(start, start + new_count):
             self._page_status[idx] = "waiting"
             self._color_pages[idx] = old_color
+            if old_adjustment:
+                self._page_adjustments[idx] = dict(old_adjustment)
 
     def _after_document_structure_change(self, current_page):
         self._page_count = len(self._doc) if self._doc is not None else 0
@@ -1351,6 +1365,11 @@ class PdfCleanerApp(tk.Tk):
         self._color_pages = {
             idx: self._color_pages.get(idx, False)
             for idx in range(self._page_count)
+        }
+        self._page_adjustments = {
+            idx: dict(self._page_adjustments[idx])
+            for idx in range(self._page_count)
+            if idx in self._page_adjustments
         }
         self._build_thumb_widgets()
         self._go_page(self._current_page)
@@ -1608,6 +1627,7 @@ class PdfCleanerApp(tk.Tk):
 
         render_dpi = 300
         render_zoom = render_dpi / 72.0
+        brightness, contrast = self._page_adjustment_values(idx)
         is_color = bool(self._color_pages.get(idx, False))
         preserve_color = bool(self.keep_color_var.get() and is_color)
         edge_cleanup = _edge_cleanup_allowed(
@@ -1626,8 +1646,8 @@ class PdfCleanerApp(tk.Tk):
             edge_threshold=int(self.thresh_var.get()),
             deskew=bool(self.deskew_var.get()),
             max_angle=float(self.angle_var.get()),
-            brightness=int(self.brightness_var.get()),
-            contrast=int(self.contrast_var.get()),
+            brightness=brightness,
+            contrast=contrast,
         )
 
         rot = self._rotations.get(idx, 0)
@@ -1641,8 +1661,8 @@ class PdfCleanerApp(tk.Tk):
             pil_img = Image.fromarray(img)
             pil_img = _adjust_pil_image(
                 pil_img,
-                self.brightness_var.get(),
-                self.contrast_var.get())
+                brightness,
+                contrast)
             pil_img = pil_img.filter(ImageFilter.MedianFilter(3))
             pil_img = ImageEnhance.Contrast(pil_img).enhance(1.2)
             if edge_cleanup:
@@ -1683,6 +1703,7 @@ class PdfCleanerApp(tk.Tk):
         self._rotations.clear()
         self._eraser_masks.clear()
         self._crop_boxes.clear()
+        self._page_adjustments.clear()
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._page_status = {i: "waiting" for i in range(self._page_count)}
@@ -1828,10 +1849,13 @@ class PdfCleanerApp(tk.Tk):
             return
         idx = max(0, min(self._page_count - 1, idx))
         old = self._current_page
+        if idx != old:
+            self._store_current_page_adjustment()
         self._current_page = idx
         self._pan_x = 0
         self._pan_y = 0
         self._pan_anchor = None
+        self._sync_adjustment_controls(idx)
 
         # Обновить подсветку старой миниатюры
         self._update_thumb_status(old)
@@ -1915,11 +1939,8 @@ class PdfCleanerApp(tk.Tk):
                 target_h = max(1, int(round(pix.h / dpr)))
                 full_img = full_img.resize((target_w, target_h), Image.LANCZOS)
 
-            if hasattr(self, "brightness_var") and hasattr(self, "contrast_var"):
-                full_img = _adjust_pil_image(
-                    full_img,
-                    self.brightness_var.get(),
-                    self.contrast_var.get())
+            brightness, contrast = self._page_adjustment_values(idx)
+            full_img = _adjust_pil_image(full_img, brightness, contrast)
             self._page_full_render_w = full_img.width
             self._page_full_render_h = full_img.height
 
@@ -2293,14 +2314,22 @@ class PdfCleanerApp(tk.Tk):
         before_masks = list(self._eraser_masks.get(idx, []))
         before_crop = self._crop_boxes.get(idx)
         before_rot = self._rotations.get(idx, 0)
+        before_adjust = dict(self._page_adjustments.get(idx, {}))
         if idx in self._eraser_masks:
             self._eraser_masks[idx] = []
         if idx in self._crop_boxes:
             del self._crop_boxes[idx]
         if idx in self._rotations:
             del self._rotations[idx]
-        after = {"masks": [], "crop": None, "rot": 0}
-        before = {"masks": before_masks, "crop": before_crop, "rot": before_rot}
+        self._page_adjustments.pop(idx, None)
+        self._sync_adjustment_controls(idx)
+        after = {"masks": [], "crop": None, "rot": 0, "adjust": {}}
+        before = {
+            "masks": before_masks,
+            "crop": before_crop,
+            "rot": before_rot,
+            "adjust": before_adjust,
+        }
         if before != after:
             self._push_action({"type": "page_state", "page": idx, "before": before, "after": after})
         self._recount_edits()
@@ -2430,6 +2459,13 @@ class PdfCleanerApp(tk.Tk):
                 self._rotations[page] = value["rot"]
             else:
                 self._rotations.pop(page, None)
+            if "adjust" in value:
+                if value["adjust"]:
+                    self._page_adjustments[page] = dict(value["adjust"])
+                else:
+                    self._page_adjustments.pop(page, None)
+                if page == self._current_page:
+                    self._sync_adjustment_controls(page)
             self._update_thumb_status(page)
 
         self._recount_edits()
@@ -2440,22 +2476,55 @@ class PdfCleanerApp(tk.Tk):
         masks = sum(len(v) for v in self._eraser_masks.values())
         crops = len(self._crop_boxes)
         rotations = sum(1 for v in self._rotations.values() if v)
+        adjustments = len(self._page_adjustments)
         structure_edits = sum(
             1 for action in self._undo_stack
             if action.get("type") == "document_state")
-        self._edit_count = masks + crops + rotations + structure_edits
+        self._edit_count = masks + crops + rotations + adjustments + structure_edits
 
     def _update_history_buttons(self):
         if hasattr(self, "_btn_undo"):
             self._btn_undo.config(state="normal" if self._undo_stack else "disabled")
             self._btn_redo.config(state="normal" if self._redo_stack else "disabled")
 
+    def _page_adjustment_values(self, idx):
+        return _adjustment_values_from_map(self._page_adjustments, idx)
+
+    def _store_current_page_adjustment(self):
+        if self._doc is None or not hasattr(self, "brightness_var"):
+            return
+        idx = self._current_page
+        if idx < 0 or idx >= self._page_count:
+            return
+        brightness = int(self.brightness_var.get())
+        contrast = int(self.contrast_var.get())
+        if brightness == DEFAULT_BRIGHTNESS and contrast == DEFAULT_CONTRAST:
+            self._page_adjustments.pop(idx, None)
+        else:
+            self._page_adjustments[idx] = {
+                "brightness": brightness,
+                "contrast": contrast,
+            }
+
+    def _sync_adjustment_controls(self, idx):
+        if not hasattr(self, "brightness_var") or not hasattr(self, "contrast_var"):
+            return
+        brightness, contrast = self._page_adjustment_values(idx)
+        self._loading_page_adjustments = True
+        try:
+            if int(self.brightness_var.get()) != brightness:
+                self.brightness_var.set(brightness)
+            if int(self.contrast_var.get()) != contrast:
+                self.contrast_var.set(contrast)
+        finally:
+            self._loading_page_adjustments = False
+
     def _reset_brightness(self):
-        self.brightness_var.set(0)
+        self.brightness_var.set(DEFAULT_BRIGHTNESS)
         self._update_status_bar()
 
     def _reset_contrast(self):
-        self.contrast_var.set(100)
+        self.contrast_var.set(DEFAULT_CONTRAST)
         self._update_status_bar()
 
     def _reset_edge_margin(self):
@@ -2486,6 +2555,11 @@ class PdfCleanerApp(tk.Tk):
         self._preview_adjust_job = self.after(70, self._render_page)
 
     def _on_preview_adjust_change(self, *_):
+        if getattr(self, "_loading_page_adjustments", False):
+            return
+        self._store_current_page_adjustment()
+        self._recount_edits()
+        self._update_status_bar()
         self._schedule_preview_render()
 
     def _on_edge_zone_change(self, *_):
@@ -2581,6 +2655,7 @@ class PdfCleanerApp(tk.Tk):
         self._prog_var.set(0)
         self._sb_status_var.set("Запуск обработки…")
         self._update_status_bar()
+        self._store_current_page_adjustment()
 
         params = {
             "doc":          self._doc,
@@ -2590,8 +2665,6 @@ class PdfCleanerApp(tk.Tk):
             "edge_clean":   self.edge_clean_var.get(),
             "edge_margin":  self.margin_var.get(),
             "edge_thresh":  self.thresh_var.get(),
-            "brightness":   self.brightness_var.get(),
-            "contrast":     self.contrast_var.get(),
             "deskew":       self.deskew_var.get(),
             "max_angle":    self.angle_var.get(),
             "skip_first":   self.skip_first_var.get(),
@@ -2602,6 +2675,9 @@ class PdfCleanerApp(tk.Tk):
             "eraser_masks": {k: list(v) for k, v in self._eraser_masks.items()},
             "crop_boxes":   dict(self._crop_boxes),
             "color_pages":  dict(self._color_pages),
+            "page_adjustments": {
+                k: dict(v) for k, v in self._page_adjustments.items()
+            },
         }
         threading.Thread(target=self._run_processing, args=(params,),
                          daemon=True).start()
@@ -2629,8 +2705,8 @@ class PdfCleanerApp(tk.Tk):
                 edge_threshold=int(p["edge_thresh"]),
                 deskew=bool(p["deskew"]),
                 max_angle=float(p["max_angle"]),
-                brightness=int(p["brightness"]),
-                contrast=int(p["contrast"]),
+                brightness=DEFAULT_BRIGHTNESS,
+                contrast=DEFAULT_CONTRAST,
             )
 
             self._queue.put(("status", f"Открыт: {total} стр.", TXT1))
@@ -2651,6 +2727,16 @@ class PdfCleanerApp(tk.Tk):
                 )
 
                 rot = p["rotations"].get(page_num, 0)
+                brightness, contrast = _adjustment_values_from_map(
+                    p["page_adjustments"],
+                    page_num,
+                )
+                page_clean_settings = replace(
+                    clean_settings,
+                    clean_edges=edge_cleanup,
+                    brightness=brightness,
+                    contrast=contrast,
+                )
 
                 # Рендерим страницу в 300 dpi для точной очистки и сохранения размера.
                 page = doc.load_page(page_num)
@@ -2677,7 +2763,7 @@ class PdfCleanerApp(tk.Tk):
                 if is_color:
                     from PIL import ImageFilter
                     pil_img = Image.fromarray(img)
-                    pil_img = _adjust_pil_image(pil_img, p["brightness"], p["contrast"])
+                    pil_img = _adjust_pil_image(pil_img, brightness, contrast)
                     pil_img = pil_img.filter(ImageFilter.MedianFilter(3))
                     pil_img = ImageEnhance.Contrast(pil_img).enhance(1.2)
                     if edge_cleanup:
@@ -2696,7 +2782,7 @@ class PdfCleanerApp(tk.Tk):
                 gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
                 binary = clean_page_image(
                     gray,
-                    replace(clean_settings, clean_edges=edge_cleanup),
+                    page_clean_settings,
                 )
 
                 pil_img = Image.fromarray(binary).convert("L")
@@ -2850,6 +2936,14 @@ def _adjust_pil_image(pil_img, brightness, contrast):
     if int(contrast) != 100:
         pil_img = ImageEnhance.Contrast(pil_img).enhance(max(0.1, int(contrast) / 100.0))
     return pil_img
+
+
+def _adjustment_values_from_map(adjustments, idx):
+    adjustment = adjustments.get(idx) or {}
+    return (
+        int(adjustment.get("brightness", DEFAULT_BRIGHTNESS)),
+        int(adjustment.get("contrast", DEFAULT_CONTRAST)),
+    )
 
 
 def _save_pdf_images(images, output_path, dpi, split_pages=False):
