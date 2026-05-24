@@ -300,6 +300,7 @@ class PdfCleanerApp(tk.Tk):
         # Цветные страницы {индекс_страницы: да/нет}
         self._color_pages = {}
         self._page_adjustments = {}
+        self._adjustment_controls_page = None
         self._loading_page_adjustments = False
         self._crop_boxes = {}
         self._crop_start = None
@@ -1704,6 +1705,7 @@ class PdfCleanerApp(tk.Tk):
         self._eraser_masks.clear()
         self._crop_boxes.clear()
         self._page_adjustments.clear()
+        self._adjustment_controls_page = None
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._page_status = {i: "waiting" for i in range(self._page_count)}
@@ -1850,7 +1852,7 @@ class PdfCleanerApp(tk.Tk):
         idx = max(0, min(self._page_count - 1, idx))
         old = self._current_page
         if idx != old:
-            self._store_current_page_adjustment()
+            self._store_current_page_adjustment(old)
         self._current_page = idx
         self._pan_x = 0
         self._pan_y = 0
@@ -2490,10 +2492,14 @@ class PdfCleanerApp(tk.Tk):
     def _page_adjustment_values(self, idx):
         return _adjustment_values_from_map(self._page_adjustments, idx)
 
-    def _store_current_page_adjustment(self):
+    def _store_current_page_adjustment(self, idx=None):
         if self._doc is None or not hasattr(self, "brightness_var"):
             return
-        idx = self._current_page
+        if idx is None:
+            idx = getattr(self, "_adjustment_controls_page", None)
+            if idx is None:
+                idx = self._current_page
+        idx = int(idx)
         if idx < 0 or idx >= self._page_count:
             return
         brightness = int(self.brightness_var.get())
@@ -2509,6 +2515,7 @@ class PdfCleanerApp(tk.Tk):
     def _sync_adjustment_controls(self, idx):
         if not hasattr(self, "brightness_var") or not hasattr(self, "contrast_var"):
             return
+        idx = int(idx)
         brightness, contrast = self._page_adjustment_values(idx)
         self._loading_page_adjustments = True
         try:
@@ -2518,6 +2525,7 @@ class PdfCleanerApp(tk.Tk):
                 self.contrast_var.set(contrast)
         finally:
             self._loading_page_adjustments = False
+        self._adjustment_controls_page = idx
 
     def _reset_brightness(self):
         self.brightness_var.set(DEFAULT_BRIGHTNESS)
@@ -2557,10 +2565,14 @@ class PdfCleanerApp(tk.Tk):
     def _on_preview_adjust_change(self, *_):
         if getattr(self, "_loading_page_adjustments", False):
             return
-        self._store_current_page_adjustment()
+        idx = getattr(self, "_adjustment_controls_page", None)
+        if idx is None:
+            idx = self._current_page
+        self._store_current_page_adjustment(idx)
         self._recount_edits()
         self._update_status_bar()
-        self._schedule_preview_render()
+        if idx == self._current_page:
+            self._schedule_preview_render()
 
     def _on_edge_zone_change(self, *_):
         self._update_edge_zone_button()
