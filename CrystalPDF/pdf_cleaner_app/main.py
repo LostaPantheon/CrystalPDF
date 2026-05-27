@@ -276,6 +276,7 @@ class PdfCleanerApp(tk.Tk):
         self._queue       = queue.Queue()
         self._processing  = False
         self._cancel_requested = threading.Event()
+        self._processing_before_state = None
         self._doc         = None          # fitz.Document
         self._input_path  = None
         self._page_count  = 0
@@ -723,6 +724,14 @@ class PdfCleanerApp(tk.Tk):
         btn_imp.pack(fill="x", pady=(0, 5))
         btn_imp.config(highlightbackground=BLUE_BDR)
 
+        self._export_btn = styled_btn(
+            file_sec, "⬇  Экспорт PDF",
+            self._export_session,
+            fg=GREEN, bg=GREEN_BG,
+            padx=12, pady=8, font_size=10)
+        self._export_btn.pack(fill="x", pady=(0, 5))
+        self._export_btn.config(highlightbackground=GREEN_BDR)
+
         # Чип выбранного файла
         self._file_chip = tk.Label(
             file_sec, text="нет файла",
@@ -1089,6 +1098,9 @@ class PdfCleanerApp(tk.Tk):
         styled_btn(tb, "+90°  ↻", lambda: self._rotate_page(90),
                    fg=AMBER, bg=AMBER_BG, pady=5, padx=8
                    ).pack(side="left", padx=2, pady=4)
+        styled_btn(tb, "⇄  Выровнять", self._deskew_current_page,
+                   fg=CYAN, bg=CYAN_BG, pady=5, padx=8
+                   ).pack(side="left", padx=2, pady=4)
 
         sep_v()
 
@@ -1301,6 +1313,53 @@ class PdfCleanerApp(tk.Tk):
         if path:
             self.output_var.set(path)
 
+    def _resolved_output_path(self):
+        out = self.output_var.get().strip() if hasattr(self, "output_var") else ""
+        if not out:
+            out_path = self._default_output_path(self._input_path)
+        else:
+            out_path = Path(out)
+            if not out_path.suffix:
+                out_path = out_path.with_suffix(".pdf")
+            elif out_path.suffix.lower() != ".pdf":
+                out_path = out_path.with_suffix(out_path.suffix + ".pdf")
+
+        if not out_path.is_absolute():
+            out_path = self._downloads_dir() / out_path.name
+
+        if self._input_path and Path(self._input_path).resolve() == out_path.resolve():
+            out_path = self._default_output_path(self._input_path)
+
+        return self._unique_output_path(out_path, self.split_pages_var.get())
+
+    def _export_session(self):
+        if not self._ensure_document_ready("экспорта"):
+            return
+        self._store_current_page_adjustment()
+        out_path = self._resolved_output_path()
+        self.output_var.set(str(out_path))
+
+        try:
+            images = []
+            for idx in range(self._page_count):
+                image = self._render_session_page_image(idx, 300)
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+                images.append(image)
+                pct = (idx + 1) / max(1, self._page_count) * 100
+                self._prog_var.set(pct)
+                self._prog_pct_var.set(f"{int(round(pct))}%")
+                self._sb_status_var.set(f"Экспорт: стр. {idx + 1}/{self._page_count}")
+                self.update_idletasks()
+
+            saved_path = _save_pdf_images(images, out_path, 300, self.split_pages_var.get())
+            self._prog_var.set(100)
+            self._prog_pct_var.set("100%")
+            self._sb_status_var.set(f"Экспорт готов: {Path(saved_path).name}")
+            messagebox.showinfo("Экспорт готов", f"PDF сохранён:\n\n{saved_path}")
+        except Exception as e:
+            messagebox.showerror("Ошибка экспорта", str(e))
+
     def _ensure_document_ready(self, action_text="операции"):
         if self._processing:
             messagebox.showwarning(
@@ -1383,6 +1442,101 @@ class PdfCleanerApp(tk.Tk):
         self._sync_clean_count_controls()
         self._recount_edits()
         self._update_status_bar()
+
+    def _clear_baked_page_state(self, idx):
+        self._rotations.pop(idx, None)
+        self._eraser_masks.pop(idx, None)
+        self._crop_boxes.pop(idx, None)
+        self._protected_boxes.pop(idx, None)
+        self._skip_pages.pop(idx, None)
+        self._page_adjustments.pop(idx, None)
+
+    def _apply_processed_session(self, pdf_bytes, page_status=None, before_state=None):
+        try:
+            import fitz
+            new_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        except Exception as e:
+            messagebox.showerror("Ошибка применения очистки", str(e))
+            return False
+
+        old_doc = self._doc
+        self._doc = new_doc
+        if old_doc is not None:
+            try:
+                old_doc.close()
+            except Exception:
+                pass
+
+        self._page_count = len(new_doc)
+        self._current_page = max(0, min(self._current_page, self._page_count - 1))
+        self._pan_x = 0
+        self._pan_y = 0
+        self._pan_anchor = None
+        self._display_box = (0.0, 0.0, 1.0, 1.0)
+        self._rotations.clear()
+        self._eraser_masks.clear()
+        self._crop_boxes.clear()
+        self._protected_boxes.clear()
+        self._skip_pages.clear()
+        self._page_adjustments.clear()
+        self._adjustment_controls_page = None
+        self._page_status = dict(page_status or {i: "waiting" for i in range(self._page_count)})
+        self._color_pages = {}
+
+        self._sync_adjustment_controls(self._current_page)
+        self._build_thumb_widgets()
+        self._go_page(self._current_page)
+        self._update_page_flags_ui()
+        self._sync_clean_count_controls()
+
+        if before_state:
+            after_state = self._snapshot_document_state()
+            self._push_action({
+                "type": "document_state",
+                "before": before_state,
+                "after": after_state,
+            })
+        else:
+            self._recount_edits()
+
+        self._update_status_bar()
+        threading.Thread(target=self._detect_color_pages, daemon=True).start()
+        return True
+
+    def _replace_current_page_with_image(self, image, dpi=300):
+        if self._doc is None:
+            return False
+        idx = self._current_page
+        before_state = self._snapshot_document_state()
+        try:
+            import fitz
+            pdf_bytes = _pdf_images_to_bytes([image.convert("RGB")], dpi)
+            page_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            self._doc.delete_page(idx)
+            self._doc.insert_pdf(page_doc, from_page=0, to_page=0, start_at=idx)
+            page_doc.close()
+        except Exception as e:
+            messagebox.showerror("Не удалось заменить страницу", str(e))
+            return False
+
+        self._clear_baked_page_state(idx)
+        self._page_status[idx] = "waiting"
+        self._color_pages[idx] = _pil_image_has_color(image)
+        self._pan_x = 0
+        self._pan_y = 0
+        self._display_box = (0.0, 0.0, 1.0, 1.0)
+        self._sync_adjustment_controls(idx)
+        self._build_thumb_widgets()
+        self._go_page(idx)
+        after_state = self._snapshot_document_state()
+        self._push_action({
+            "type": "document_state",
+            "before": before_state,
+            "after": after_state,
+        })
+        self._update_page_flags_ui()
+        self._update_status_bar()
+        return True
 
     def _shift_page_state_for_insert(self, start, count):
         def shifted(mapping):
@@ -1727,7 +1881,7 @@ class PdfCleanerApp(tk.Tk):
         out_path = self._unique_output_path(out_path)
 
         try:
-            image = self._render_current_page_for_download(idx)
+            image = self._render_session_page_image(idx, 300)
             if image.mode != "RGB":
                 image = image.convert("RGB")
             saved_path = _save_pdf_images([image], out_path, 300, False)
@@ -1737,6 +1891,28 @@ class PdfCleanerApp(tk.Tk):
                 f"Текущая страница сохранена:\n\n{saved_path}")
         except Exception as e:
             messagebox.showerror("Не удалось сохранить страницу", str(e))
+
+    def _render_session_page_image(self, idx, render_dpi=300):
+        import fitz
+        import numpy as np
+        from PIL import Image
+
+        render_zoom = render_dpi / 72.0
+        rot = self._rotations.get(idx, 0)
+        page = self._doc.load_page(idx)
+        mat = fitz.Matrix(render_zoom, render_zoom).prerotate(rot)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
+        pil_img = Image.fromarray(img)
+        original_rgb = pil_img.copy()
+
+        brightness, contrast = self._page_adjustment_values(idx)
+        if not self._skip_pages.get(idx, False) and not self._is_page_outside_clean_limit(idx):
+            pil_img = _adjust_pil_image(pil_img, brightness, contrast)
+
+        _apply_eraser(pil_img, self._eraser_masks.get(idx, []))
+        _restore_protected_region(pil_img, original_rgb, self._protected_boxes.get(idx))
+        return _apply_crop(pil_img, self._crop_boxes.get(idx))
 
     def _render_current_page_for_download(self, idx):
         import fitz
@@ -2140,21 +2316,23 @@ class PdfCleanerApp(tk.Tk):
             pw, ph = img.width, img.height
             self._canvas.create_rectangle(
                 ox + 6, oy + 6, ox + pw + 6, oy + ph + 6,
-                fill="#000000", outline="")
-            self._canvas.create_image(ox, oy, anchor="nw", image=photo)
+                fill="#000000", outline="", tags=("page_layer",))
+            self._canvas.create_image(ox, oy, anchor="nw", image=photo,
+                                      tags=("page_layer",))
 
             # Поворот-бейдж
             if rot:
                 self._canvas.create_text(
                     ox + pw - 6, oy + 6,
                     text=f"{rot}°", anchor="ne",
-                    fill=BLUE, font=("Courier New", 9, "bold"))
+                    fill=BLUE, font=("Courier New", 9, "bold"),
+                    tags=("page_layer",))
 
             # Цветная страница — полоска внизу
             if self._color_pages.get(idx, False):
                 self._canvas.create_rectangle(
                     ox, oy + ph - 6, ox + pw, oy + ph,
-                    fill=AMBER, outline="")
+                    fill=AMBER, outline="", tags=("page_layer",))
 
             self._draw_edge_zone_overlay(page_w, page_h)
             self._draw_protected_box_overlay()
@@ -2163,7 +2341,7 @@ class PdfCleanerApp(tk.Tk):
             if has_crop:
                 self._canvas.create_rectangle(
                     ox, oy, ox + pw, oy + ph,
-                    outline=GREEN, width=2)
+                    outline=GREEN, width=2, tags=("page_layer",))
 
         except ImportError:
             self._canvas.delete("all")
@@ -2207,6 +2385,23 @@ class PdfCleanerApp(tk.Tk):
         self._pan_y = oy - base_y
 
         return ox, oy
+
+    def _move_page_layer_to_current_pan(self):
+        cw = max(self._canvas.winfo_width(), 100)
+        ch = max(self._canvas.winfo_height(), 100)
+        pw = self._page_render_w
+        ph = self._page_render_h
+        if pw <= 0 or ph <= 0:
+            return
+        old_ox, old_oy = self._page_render_ox, self._page_render_oy
+        new_ox, new_oy = self._page_origin(cw, ch, pw, ph, 24)
+        dx = new_ox - old_ox
+        dy = new_oy - old_oy
+        if abs(dx) < 0.001 and abs(dy) < 0.001:
+            return
+        self._page_render_ox = new_ox
+        self._page_render_oy = new_oy
+        self._canvas.move("page_layer", dx, dy)
 
     def _canvas_to_norm(self, cx, cy, clamp=False):
         ox, oy = self._page_render_ox, self._page_render_oy
@@ -2269,13 +2464,13 @@ class PdfCleanerApp(tk.Tk):
                 cx0, cy0, cx1, cy1,
                 fill=CYAN, stipple="gray25",
                 outline=CYAN, width=2, dash=(6, 3),
-                tags="protect_overlay")
+                tags=("page_layer", "protect_overlay"))
             label = "Защита" if len(boxes) == 1 else f"Защита {number}"
             self._canvas.create_text(
                 cx0 + 8, cy0 + 8,
                 text=label, anchor="nw",
                 fill=CYAN, font=("Segoe UI", 9, "bold"),
-                tags="protect_overlay")
+                tags=("page_layer", "protect_overlay"))
 
     def _draw_skip_page_overlay(self):
         manual_skip = self._skip_pages.get(self._current_page, False)
@@ -2295,13 +2490,13 @@ class PdfCleanerApp(tk.Tk):
         self._canvas.create_rectangle(
             ox, oy, ox + pw, oy + h,
             fill=AMBER_BG, outline=AMBER, width=1,
-            tags="skip_page_overlay")
+            tags=("page_layer", "skip_page_overlay"))
         self._canvas.create_text(
             ox + 8, oy + h // 2,
             text=text,
             anchor="w", fill=AMBER,
             font=("Segoe UI", 9, "bold"),
-            tags="skip_page_overlay")
+            tags=("page_layer", "skip_page_overlay"))
 
     def _redraw_edge_zone_overlay(self):
         self._canvas.delete("edge_zone")
@@ -2314,6 +2509,8 @@ class PdfCleanerApp(tk.Tk):
         if not getattr(self, "_show_edge_zone", False):
             return
         if self._skip_pages.get(self._current_page, False):
+            return
+        if self._is_page_outside_clean_limit(self._current_page):
             return
         if not hasattr(self, "edge_clean_var") or not self.edge_clean_var.get():
             return
@@ -2357,7 +2554,7 @@ class PdfCleanerApp(tk.Tk):
             self._canvas.create_rectangle(
                 cx0, cy0, cx1, cy1,
                 fill=AMBER, stipple="gray25",
-                outline=AMBER, width=1, tags="edge_zone")
+                outline=AMBER, width=1, tags=("page_layer", "edge_zone"))
 
         draw_rect(0.0, 0.0, 1.0, my)
         draw_rect(0.0, 1.0 - my, 1.0, 1.0)
@@ -2464,7 +2661,7 @@ class PdfCleanerApp(tk.Tk):
             sx, sy, px, py = self._pan_anchor
             self._pan_x = px + (event.x - sx)
             self._pan_y = py + (event.y - sy)
-            self._render_page()
+            self._move_page_layer_to_current_pan()
         elif self._tool == "crop" and self._crop_start:
             point = self._canvas_to_norm(event.x, event.y, clamp=True)
             if point:
@@ -2754,6 +2951,24 @@ class PdfCleanerApp(tk.Tk):
         self._render_page()
         self._recount_edits()
         self._update_status_bar()
+
+    def _deskew_current_page(self):
+        if not self._ensure_document_ready("выравнивания страницы"):
+            return
+        idx = self._current_page
+        try:
+            image = self._render_session_page_image(idx, 300)
+            fixed, angle = _deskew_pil_image(image, float(self.angle_var.get()))
+        except Exception as e:
+            messagebox.showerror("Не удалось выровнять страницу", str(e))
+            return
+
+        if abs(angle) < 0.25:
+            self._sb_status_var.set("Перекос не найден или слишком мал")
+            return
+
+        if self._replace_current_page_with_image(fixed, 300):
+            self._sb_status_var.set(f"Страница {idx + 1} выровнена на {angle:.2f}°")
 
     # ── МАСШТАБ ───────────────────────────────────────────────────────────────
     def _set_zoom(self, value):
@@ -3086,6 +3301,8 @@ class PdfCleanerApp(tk.Tk):
                 self._cancel_btn.config(
                     state="normal", fg=RED, bg=RED_BG,
                     highlightbackground=RED_BDR)
+            if hasattr(self, "_export_btn"):
+                self._export_btn.config(state="disabled", fg=TXT2, bg=BG2)
         else:
             self._run_btn.config(
                 text="▶  Запустить очистку",
@@ -3095,6 +3312,8 @@ class PdfCleanerApp(tk.Tk):
                 self._cancel_btn.config(
                     state="disabled", fg=TXT2, bg=BG2,
                     highlightbackground=BDR)
+            if hasattr(self, "_export_btn"):
+                self._export_btn.config(state="normal", fg=GREEN, bg=GREEN_BG)
 
     def _cancel_processing(self):
         if not self._processing:
@@ -3110,25 +3329,6 @@ class PdfCleanerApp(tk.Tk):
         if self._doc is None:
             messagebox.showwarning("Ошибка", "Сначала откройте PDF через «Импорт PDF».")
             return
-        out = self.output_var.get().strip()
-        if not out:
-            out_path = self._default_output_path(self._input_path)
-        else:
-            out_path = Path(out)
-            if not out_path.suffix:
-                out_path = out_path.with_suffix(".pdf")
-            elif out_path.suffix.lower() != ".pdf":
-                out_path = out_path.with_suffix(out_path.suffix + ".pdf")
-
-        if not out_path.is_absolute():
-            out_path = self._downloads_dir() / out_path.name
-
-        if self._input_path and Path(self._input_path).resolve() == out_path.resolve():
-            out_path = self._default_output_path(self._input_path)
-
-        out_path = self._unique_output_path(out_path, self.split_pages_var.get())
-        self.output_var.set(str(out_path))
-        out = str(out_path)
 
         try:
             while True:
@@ -3149,10 +3349,10 @@ class PdfCleanerApp(tk.Tk):
         self._sync_clean_count_controls()
         self._update_status_bar()
         self._store_current_page_adjustment()
+        self._processing_before_state = self._snapshot_document_state()
 
         params = {
             "doc":          self._doc,
-            "output_path":  out,
             "dot_limit":    self.dot_var.get(),
             "h_val":        self.denoise_var.get(),
             "edge_clean":   self.edge_clean_var.get(),
@@ -3162,7 +3362,6 @@ class PdfCleanerApp(tk.Tk):
             "max_angle":    self.angle_var.get(),
             "skip_first":   self.skip_first_var.get(),
             "skip_last":    self.skip_last_var.get(),
-            "split_pages":  self.split_pages_var.get(),
             "keep_color":   self.keep_color_var.get(),
             "rotations":    dict(self._rotations),
             "eraser_masks": {k: list(v) for k, v in self._eraser_masks.items()},
@@ -3196,6 +3395,7 @@ class PdfCleanerApp(tk.Tk):
             clean_page_limit = p.get("clean_page_limit")
             cancel_event = p.get("cancel_event")
             out_images = []
+            page_statuses = {}
             render_dpi = 300
             render_zoom = render_dpi / 72.0
             clean_settings = CleanSettings(
@@ -3272,7 +3472,8 @@ class PdfCleanerApp(tk.Tk):
                     _restore_protected_region(pil_img, source, protected_box)
                     pil_img = _apply_crop(pil_img, p["crop_boxes"].get(page_num))
                     out_images.append(pil_img)
-                    self._queue.put(("page_status", page_num, "skipped" if (manual_skip or limit_skip) else "done"))
+                    page_statuses[page_num] = "skipped" if (manual_skip or limit_skip) else "done"
+                    self._queue.put(("page_status", page_num, page_statuses[page_num]))
                     if manual_skip:
                         suffix = " — не чистить"
                     elif limit_skip:
@@ -3298,6 +3499,7 @@ class PdfCleanerApp(tk.Tk):
                     _restore_protected_region(pil_img, original_rgb, protected_box)
                     pil_img = _apply_crop(pil_img, p["crop_boxes"].get(page_num))
                     out_images.append(pil_img)
+                    page_statuses[page_num] = "done"
                     self._queue.put(("page_status", page_num, "done"))
                     self._queue.put(("progress", pct, lbl + " — цвет сохранён"))
                     continue
@@ -3315,6 +3517,7 @@ class PdfCleanerApp(tk.Tk):
                 pil_img = _apply_crop(pil_img, p["crop_boxes"].get(page_num))
                 out_images.append(pil_img)
 
+                page_statuses[page_num] = "done"
                 self._queue.put(("page_status", page_num, "done"))
                 self._queue.put(("progress", pct, lbl))
 
@@ -3322,8 +3525,7 @@ class PdfCleanerApp(tk.Tk):
             if cancel_event is not None and cancel_event.is_set():
                 self._queue.put(("cancelled",))
                 return
-            self._queue.put(("status", "Сохранение PDF…", TXT1))
-            saved_path = p["output_path"]
+            self._queue.put(("status", "Применение к текущей сессии…", TXT1))
             if out_images:
                 # Конвертируем в RGB чтобы смешанные цветные/ч-б сохранились
                 save_images = []
@@ -3331,9 +3533,11 @@ class PdfCleanerApp(tk.Tk):
                     if im.mode != "RGB":
                         im = im.convert("RGB")
                     save_images.append(im)
-                saved_path = _save_pdf_images(save_images, p["output_path"], render_dpi, p["split_pages"])
+                pdf_bytes = _pdf_images_to_bytes(save_images, render_dpi)
+            else:
+                pdf_bytes = b""
 
-            self._queue.put(("done", str(saved_path)))
+            self._queue.put(("session_done", pdf_bytes, page_statuses))
 
         except ImportError as e:
             self._queue.put(("error",
@@ -3372,6 +3576,27 @@ class PdfCleanerApp(tk.Tk):
                     self._render_page()
                     self._update_status_bar()
 
+                elif kind == "session_done":
+                    _, pdf_bytes, page_statuses = msg
+                    self._prog_var.set(100)
+                    self._prog_pct_var.set("100%")
+                    before_state = self._processing_before_state
+                    self._processing_before_state = None
+                    ok = bool(pdf_bytes) and self._apply_processed_session(
+                        pdf_bytes,
+                        page_statuses,
+                        before_state,
+                    )
+                    self._processing = False
+                    self._set_processing_buttons(False)
+                    if ok:
+                        self._sb_status_var.set("Очистка применена к текущей сессии")
+                        self._badge_label.config(text="✓ Готово", fg=GREEN)
+                        self._st_main.config(text="✓ Очистка применена", fg=GREEN)
+                        messagebox.showinfo(
+                            "Готово!",
+                            "Очистка применена к текущей сессии.\n\nДля сохранения нажмите «Экспорт PDF».")
+
                 elif kind == "done":
                     _, out_path = msg
                     self._prog_var.set(100)
@@ -3386,6 +3611,7 @@ class PdfCleanerApp(tk.Tk):
 
                 elif kind == "cancelled":
                     self._processing = False
+                    self._processing_before_state = None
                     self._set_processing_buttons(False)
                     for idx, status in list(self._page_status.items()):
                         if status == "working":
@@ -3398,6 +3624,7 @@ class PdfCleanerApp(tk.Tk):
                 elif kind == "error":
                     _, err = msg
                     self._processing = False
+                    self._processing_before_state = None
                     self._set_processing_buttons(False)
                     self._sb_status_var.set("❌  Ошибка обработки")
                     self._badge_label.config(text="✗ Ошибка", fg=RED)
@@ -3583,6 +3810,90 @@ def _save_pdf_images(images, output_path, dpi, split_pages=False):
         quality=95)
     temp_output.replace(output_path)
     return output_path
+
+
+def _pdf_images_to_bytes(images, dpi):
+    import io
+
+    if not images:
+        return b""
+
+    save_images = []
+    for image in images:
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        save_images.append(image)
+
+    buffer = io.BytesIO()
+    save_images[0].save(
+        buffer,
+        format="PDF",
+        save_all=True,
+        append_images=save_images[1:],
+        resolution=float(dpi),
+        quality=95)
+    return buffer.getvalue()
+
+
+def _pil_image_has_color(image):
+    import numpy as np
+
+    arr = np.asarray(image.convert("RGB"), dtype=np.int16)
+    if arr.size == 0:
+        return False
+    r = arr[:, :, 0]
+    g = arr[:, :, 1]
+    b = arr[:, :, 2]
+    chroma = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) // 3
+    return bool(np.mean(chroma > 15) > 0.005)
+
+
+def _deskew_pil_image(pil_img, max_angle_deg):
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    source = pil_img.convert("RGB")
+    gray = np.asarray(source.convert("L"))
+    h, w = gray.shape[:2]
+    if h <= 0 or w <= 0:
+        return source, 0.0
+
+    crop_x = max(1, int(w * 0.04))
+    crop_y = max(1, int(h * 0.04))
+    work = gray[crop_y : h - crop_y, crop_x : w - crop_x]
+    if work.size == 0:
+        work = gray
+
+    _, thresh = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel_width = max(25, int(w / 55))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1))
+    dilated = cv2.dilate(thresh, kernel, iterations=1)
+    coords = np.column_stack(np.where(dilated > 0))
+    if len(coords) < 80:
+        return source, 0.0
+
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+
+    if abs(angle) > float(max_angle_deg) or abs(angle) < 0.25:
+        return source, 0.0
+
+    arr = np.asarray(source)
+    center = (w // 2, h // 2)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(
+        arr,
+        matrix,
+        (w, h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    return Image.fromarray(rotated, "RGB"), float(angle)
 
 
 def _deskew(gray, max_angle_deg):
