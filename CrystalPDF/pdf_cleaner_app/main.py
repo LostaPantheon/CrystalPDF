@@ -56,6 +56,7 @@ _enable_dpi_awareness()
 DEFAULT_BRIGHTNESS = 0
 DEFAULT_CONTRAST = 100
 DEFAULT_EDGE_MARGIN = 5
+MAX_PROTECTED_BOXES_PER_PAGE = 15
 DESKTOP_SHORTCUT_NAME = "CrystalPDF"
 LEGACY_DESKTOP_SHORTCUT_NAMES = ("Mini_Icon_CrystalPDF",)
 DESKTOP_SHORTCUT_NEVER_ASK_SETTING = "desktop_shortcut_never_ask"
@@ -856,13 +857,48 @@ class PdfCleanerApp(tk.Tk):
         self.skip_last_var   = tk.BooleanVar(value=True)
         self.keep_color_var  = tk.BooleanVar(value=True)
         self.split_pages_var = tk.BooleanVar(value=False)
+        self.clean_limit_var = tk.BooleanVar(value=False)
+        self.clean_count_var = tk.IntVar(value=1)
         self.edge_clean_var.trace_add("write", self._on_edge_zone_change)
+        self.clean_limit_var.trace_add("write", self._on_clean_limit_change)
+        self.clean_count_var.trace_add("write", self._on_clean_limit_change)
 
         self._chk(pg_sec, "Очистка краёв (линии сканера)", self.edge_clean_var)
         self._chk(pg_sec, "Выравнивание наклона (deskew)",  self.deskew_var)
         self._chk(pg_sec, "Пропустить первую стр.",         self.skip_first_var)
         self._chk(pg_sec, "Пропустить последнюю стр.",      self.skip_last_var)
         self._chk(pg_sec, "Разбить результат на страницы",  self.split_pages_var)
+
+        clean_count_row = tk.Frame(pg_sec, bg=BG1)
+        clean_count_row.pack(fill="x", pady=(8, 0))
+        tk.Checkbutton(
+            clean_count_row, variable=self.clean_limit_var,
+            bg=BG1, activebackground=BG1,
+            fg=TXT1, activeforeground=TXT0,
+            selectcolor=BG0,
+            font=("Segoe UI", 9),
+            text="Очистить только",
+            anchor="w").pack(side="left")
+        self._clean_count_spin = tk.Spinbox(
+            clean_count_row, from_=1, to=1, width=4,
+            textvariable=self.clean_count_var,
+            font=("Courier New", 9, "bold"),
+            fg=TXT0, bg=BG0,
+            buttonbackground=BG2,
+            insertbackground=TXT0,
+            relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=BDR,
+            command=self._on_clean_limit_change)
+        self._clean_count_spin.pack(side="left", padx=(6, 4), ipady=2)
+        tk.Label(clean_count_row, text="стр. с начала",
+                 font=("Segoe UI", 8), fg=TXT2, bg=BG1
+                 ).pack(side="left")
+        self._clean_limit_hint_lbl = tk.Label(
+            pg_sec, text="",
+            font=("Segoe UI", 8), fg=TXT3, bg=BG1,
+            anchor="w", wraplength=190, justify="left")
+        self._clean_limit_hint_lbl.pack(fill="x", pady=(3, 0))
+        self._sync_clean_count_controls()
 
         # «Сохранить цветные» с золотым бейджем
         color_row = tk.Frame(pg_sec, bg=BG1)
@@ -950,15 +986,21 @@ class PdfCleanerApp(tk.Tk):
         self._cancel_btn.config(state="disabled")
 
         self._prog_var = tk.DoubleVar(value=0)
+        self._prog_pct_var = tk.StringVar(value="0%")
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("P.Horizontal.TProgressbar",
                         troughcolor=BDR2, background=BLUE,
                         bordercolor=BG1, lightcolor=BLUE, darkcolor=BLUE,
                         thickness=4)
-        ttk.Progressbar(foot, variable=self._prog_var, maximum=100,
+        prog_row = tk.Frame(foot, bg=BG1)
+        prog_row.pack(fill="x", padx=12, pady=(0, 4))
+        ttk.Progressbar(prog_row, variable=self._prog_var, maximum=100,
                         style="P.Horizontal.TProgressbar"
-                        ).pack(fill="x", padx=12, pady=(0, 4))
+                        ).pack(side="left", fill="x", expand=True)
+        tk.Label(prog_row, textvariable=self._prog_pct_var,
+                 font=("Courier New", 8, "bold"), fg=BLUE, bg=BG1,
+                 width=4, anchor="e").pack(side="right", padx=(8, 0))
 
         self._sb_status_var = tk.StringVar(value="Готов · откройте PDF")
         tk.Label(foot, textvariable=self._sb_status_var,
@@ -1138,7 +1180,8 @@ class PdfCleanerApp(tk.Tk):
         legend = tk.Frame(inner, bg=BG1)
         legend.pack(side="right", padx=16)
         for color, text in [(GREEN, "Готово"), (BLUE, "Обработка"),
-                            (RED, "Ошибка"), (TXT3, "Ожидание")]:
+                            (RED, "Ошибка"), (AMBER, "Не чистить"),
+                            (TXT3, "Ожидание")]:
             dot = tk.Frame(legend, bg=color,
                            width=self._ui.px(7), height=self._ui.px(7))
             dot.pack(side="left", padx=(6, 2))
@@ -1173,6 +1216,11 @@ class PdfCleanerApp(tk.Tk):
                                   font=("Courier New", 8), fg=TXT3,
                                   bg="#0a0c12", anchor="e")
         self._st_right.pack(side="right")
+
+        self._st_skip = tk.Label(inner, text="",
+                                 font=("Courier New", 8), fg=AMBER,
+                                 bg="#0a0c12", padx=0, pady=1)
+        self._st_skip.pack(side="right", padx=(0, 8))
 
     # ── ПОМОЩНИКИ ВИДЖЕТОВ ────────────────────────────────────────────────────
     def _section(self, parent, text):
@@ -1279,7 +1327,11 @@ class PdfCleanerApp(tk.Tk):
             "rotations": dict(self._rotations),
             "eraser_masks": {k: list(v) for k, v in self._eraser_masks.items()},
             "crop_boxes": dict(self._crop_boxes),
-            "protected_boxes": dict(self._protected_boxes),
+            "protected_boxes": {
+                k: _sanitize_norm_boxes(v)
+                for k, v in self._protected_boxes.items()
+                if _protected_box_count(v)
+            },
             "page_status": dict(self._page_status),
             "color_pages": dict(self._color_pages),
             "skip_pages": dict(self._skip_pages),
@@ -1309,7 +1361,11 @@ class PdfCleanerApp(tk.Tk):
         self._rotations = dict(state.get("rotations", {}))
         self._eraser_masks = {k: list(v) for k, v in state.get("eraser_masks", {}).items()}
         self._crop_boxes = dict(state.get("crop_boxes", {}))
-        self._protected_boxes = dict(state.get("protected_boxes", {}))
+        self._protected_boxes = {
+            k: _sanitize_norm_boxes(v)
+            for k, v in state.get("protected_boxes", {}).items()
+            if _protected_box_count(v)
+        }
         self._page_status = dict(state.get("page_status", {}))
         self._color_pages = dict(state.get("color_pages", {}))
         self._skip_pages = dict(state.get("skip_pages", {}))
@@ -1324,6 +1380,7 @@ class PdfCleanerApp(tk.Tk):
         self._build_thumb_widgets()
         self._go_page(self._current_page)
         self._update_page_flags_ui()
+        self._sync_clean_count_controls()
         self._recount_edits()
         self._update_status_bar()
 
@@ -1419,9 +1476,10 @@ class PdfCleanerApp(tk.Tk):
             if self._skip_pages.get(idx, False)
         }
         self._protected_boxes = {
-            idx: self._protected_boxes[idx]
+            idx: boxes
             for idx in range(self._page_count)
-            if idx in self._protected_boxes
+            for boxes in [_sanitize_norm_boxes(self._protected_boxes.get(idx))]
+            if boxes
         }
         self._page_adjustments = {
             idx: dict(self._page_adjustments[idx])
@@ -1431,6 +1489,9 @@ class PdfCleanerApp(tk.Tk):
         self._build_thumb_widgets()
         self._go_page(self._current_page)
         self._update_page_flags_ui()
+        if hasattr(self, "clean_limit_var") and not self.clean_limit_var.get():
+            self.clean_count_var.set(max(1, self._page_count))
+        self._sync_clean_count_controls()
         self._update_status_bar()
         threading.Thread(target=self._detect_color_pages, daemon=True).start()
 
@@ -1777,6 +1838,9 @@ class PdfCleanerApp(tk.Tk):
         self._page_status = {i: "waiting" for i in range(self._page_count)}
         self._color_pages = {}
         self._edit_count = 0
+        if hasattr(self, "clean_limit_var") and not self.clean_limit_var.get():
+            self.clean_count_var.set(max(1, self._page_count))
+        self._sync_clean_count_controls()
 
         fname = os.path.basename(path)
         self._title_label.config(text=f"✦  CrystalPDF  ·  {fname}")
@@ -1903,7 +1967,9 @@ class PdfCleanerApp(tk.Tk):
             return
         frame, dot, rot_lbl = self._thumb_frames[idx]
         status = self._page_status.get(idx, "waiting")
-        if self._skip_pages.get(idx, False):
+        manual_skip = self._skip_pages.get(idx, False)
+        limit_skip = self._is_page_outside_clean_limit(idx)
+        if manual_skip or limit_skip:
             status = "skipped"
         dot.config(bg=STATUS_COLORS.get(status, TXT3))
 
@@ -1911,11 +1977,20 @@ class PdfCleanerApp(tk.Tk):
         marks = []
         if rot:
             marks.append(f"{rot}°")
-        if self._skip_pages.get(idx, False):
-            marks.append("SKIP")
-        if self._protected_boxes.get(idx):
-            marks.append("SAFE")
+        if manual_skip:
+            marks.append("НЕ ЧИСТИТЬ")
+        elif limit_skip:
+            marks.append("ВНЕ ЛИМИТА")
+        protected_count = _protected_box_count(self._protected_boxes.get(idx))
+        if protected_count:
+            marks.append(f"ЗАЩ {protected_count}")
         rot_lbl.config(text=" ".join(marks))
+        if manual_skip or limit_skip:
+            rot_lbl.config(fg=AMBER, bg=AMBER_BG, padx=3)
+        elif protected_count:
+            rot_lbl.config(fg=CYAN, bg=BG1, padx=0)
+        else:
+            rot_lbl.config(fg=AMBER, bg=BG1, padx=0)
 
         # Подсветка текущей
         is_cur = (idx == self._current_page)
@@ -2020,7 +2095,7 @@ class PdfCleanerApp(tk.Tk):
 
             protected_source = full_img.copy()
             brightness, contrast = self._page_adjustment_values(idx)
-            if not self._skip_pages.get(idx, False):
+            if not self._skip_pages.get(idx, False) and not self._is_page_outside_clean_limit(idx):
                 full_img = _adjust_pil_image(full_img, brightness, contrast)
             self._page_full_render_w = full_img.width
             self._page_full_render_h = full_img.height
@@ -2182,39 +2257,48 @@ class PdfCleanerApp(tk.Tk):
         return self._norm_box_to_canvas((x0, y0, x1, y1))
 
     def _draw_protected_box_overlay(self):
-        box = self._protected_boxes.get(self._current_page)
-        if not box:
+        boxes = _sanitize_norm_boxes(self._protected_boxes.get(self._current_page))
+        if not boxes:
             return
-        coords = self._norm_box_intersection_to_canvas(box)
-        if not coords:
-            return
-        cx0, cy0, cx1, cy1 = coords
-        self._canvas.create_rectangle(
-            cx0, cy0, cx1, cy1,
-            fill=CYAN, stipple="gray25",
-            outline=CYAN, width=2, dash=(6, 3),
-            tags="protect_overlay")
-        self._canvas.create_text(
-            cx0 + 8, cy0 + 8,
-            text="Защита", anchor="nw",
-            fill=CYAN, font=("Segoe UI", 9, "bold"),
-            tags="protect_overlay")
+        for number, box in enumerate(boxes, start=1):
+            coords = self._norm_box_intersection_to_canvas(box)
+            if not coords:
+                continue
+            cx0, cy0, cx1, cy1 = coords
+            self._canvas.create_rectangle(
+                cx0, cy0, cx1, cy1,
+                fill=CYAN, stipple="gray25",
+                outline=CYAN, width=2, dash=(6, 3),
+                tags="protect_overlay")
+            label = "Защита" if len(boxes) == 1 else f"Защита {number}"
+            self._canvas.create_text(
+                cx0 + 8, cy0 + 8,
+                text=label, anchor="nw",
+                fill=CYAN, font=("Segoe UI", 9, "bold"),
+                tags="protect_overlay")
 
     def _draw_skip_page_overlay(self):
-        if not self._skip_pages.get(self._current_page, False):
+        manual_skip = self._skip_pages.get(self._current_page, False)
+        limit_skip = self._is_page_outside_clean_limit(self._current_page)
+        if not manual_skip and not limit_skip:
             return
         ox, oy = self._page_render_ox, self._page_render_oy
         pw = self._page_render_w
         if pw <= 0:
             return
         h = self._ui.px(24)
+        text = (
+            "Страница помечена: не чистить"
+            if manual_skip
+            else "Вне выбранного количества очистки"
+        )
         self._canvas.create_rectangle(
             ox, oy, ox + pw, oy + h,
             fill=AMBER_BG, outline=AMBER, width=1,
             tags="skip_page_overlay")
         self._canvas.create_text(
             ox + 8, oy + h // 2,
-            text="Страница помечена: не чистить",
+            text=text,
             anchor="w", fill=AMBER,
             font=("Segoe UI", 9, "bold"),
             tags="skip_page_overlay")
@@ -2436,9 +2520,14 @@ class PdfCleanerApp(tk.Tk):
                 x1, y1 = point
                 box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
                 if (box[2] - box[0]) > 0.03 and (box[3] - box[1]) > 0.03:
-                    before = self._protected_boxes.get(idx)
-                    self._protected_boxes[idx] = box
-                    self._push_action({"type": "protect", "page": idx, "before": before, "after": box})
+                    before = _sanitize_norm_boxes(self._protected_boxes.get(idx))
+                    if len(before) >= MAX_PROTECTED_BOXES_PER_PAGE:
+                        self._sb_status_var.set(
+                            f"На странице уже {MAX_PROTECTED_BOXES_PER_PAGE} защищённых областей")
+                    else:
+                        after = before + [box]
+                        self._protected_boxes[idx] = after
+                        self._push_action({"type": "protect", "page": idx, "before": before, "after": after})
                     self._update_thumb_status(idx)
                     self._update_page_flags_ui()
             self._protect_start = None
@@ -2453,9 +2542,9 @@ class PdfCleanerApp(tk.Tk):
             return
         xf, yf = point
         sz = self._eraser_sz_var.get()
-        protected = _sanitize_norm_box(self._protected_boxes.get(self._current_page))
-        if protected and protected[0] <= xf <= protected[2] and protected[1] <= yf <= protected[3]:
-            return
+        for protected in _sanitize_norm_boxes(self._protected_boxes.get(self._current_page)):
+            if protected[0] <= xf <= protected[2] and protected[1] <= yf <= protected[3]:
+                return
         full_w = max(1, getattr(self, "_page_full_render_w", self._page_render_w))
         full_h = max(1, getattr(self, "_page_full_render_h", self._page_render_h))
         rf = sz / min(full_w, full_h)
@@ -2506,7 +2595,7 @@ class PdfCleanerApp(tk.Tk):
         if self._doc is None:
             return
         idx = self._current_page
-        before = self._protected_boxes.get(idx)
+        before = _sanitize_norm_boxes(self._protected_boxes.get(idx))
         if not before:
             return
         self._protected_boxes.pop(idx, None)
@@ -2530,12 +2619,83 @@ class PdfCleanerApp(tk.Tk):
                     fg=TXT1, bg=BG2,
                     highlightbackground=BDR)
         if hasattr(self, "_clear_protect_btn"):
-            has_box = bool(self._protected_boxes.get(idx))
+            protected_count = _protected_box_count(self._protected_boxes.get(idx))
+            has_box = protected_count > 0
             self._clear_protect_btn.config(
+                text=f"Снять защиту ({protected_count})" if has_box else "Снять защиту области",
                 state="normal" if has_box else "disabled",
                 fg=CYAN if has_box else TXT2,
                 bg=CYAN_BG if has_box else BG2,
                 highlightbackground=CYAN_BDR if has_box else BDR)
+
+    def _clean_page_limit(self):
+        if not hasattr(self, "clean_limit_var") or not self.clean_limit_var.get():
+            return None
+        if self._page_count <= 0:
+            return None
+        try:
+            count = int(self.clean_count_var.get())
+        except (tk.TclError, ValueError):
+            count = self._page_count
+        return max(1, min(self._page_count, count))
+
+    def _is_page_outside_clean_limit(self, idx):
+        limit = self._clean_page_limit()
+        return limit is not None and idx >= limit
+
+    def _sync_clean_count_controls(self):
+        if not hasattr(self, "clean_count_var"):
+            return
+        if getattr(self, "_clean_limit_syncing", False):
+            return
+        self._clean_limit_syncing = True
+        try:
+            page_count = max(1, int(self._page_count or 0))
+            try:
+                current = int(self.clean_count_var.get())
+            except (tk.TclError, ValueError):
+                current = page_count
+
+            target = page_count if not self.clean_limit_var.get() else current
+            target = max(1, min(page_count, target))
+            if current != target:
+                self.clean_count_var.set(target)
+
+            enabled = self.clean_limit_var.get() and self._page_count > 0
+            if hasattr(self, "_clean_count_spin"):
+                self._clean_count_spin.config(
+                    to=page_count,
+                    state="normal" if enabled else "disabled",
+                    disabledbackground=BG0,
+                    disabledforeground=TXT2)
+
+            if hasattr(self, "_clean_limit_hint_lbl"):
+                if self._page_count <= 0:
+                    text = "Откройте PDF, чтобы выбрать количество страниц"
+                elif enabled:
+                    skipped = max(0, self._page_count - target)
+                    text = f"Будут очищены первые {target} стр.; остальные без очистки: {skipped}"
+                else:
+                    text = "Очищаются все страницы"
+                self._clean_limit_hint_lbl.config(text=text)
+        finally:
+            self._clean_limit_syncing = False
+
+    def _on_clean_limit_change(self, *_):
+        if getattr(self, "_clean_limit_syncing", False):
+            return
+        self._sync_clean_count_controls()
+        if self._doc is not None:
+            for idx in range(self._page_count):
+                if (
+                    self._page_status.get(idx) == "skipped"
+                    and not self._skip_pages.get(idx, False)
+                    and not self._is_page_outside_clean_limit(idx)
+                ):
+                    self._page_status[idx] = "waiting"
+                self._update_thumb_status(idx)
+            self._render_page()
+        self._update_status_bar()
 
     def _clear_page(self):
         idx = self._current_page
@@ -2544,7 +2704,7 @@ class PdfCleanerApp(tk.Tk):
         before_rot = self._rotations.get(idx, 0)
         before_adjust = dict(self._page_adjustments.get(idx, {}))
         before_skip = bool(self._skip_pages.get(idx, False))
-        before_protect = self._protected_boxes.get(idx)
+        before_protect = _sanitize_norm_boxes(self._protected_boxes.get(idx)) or None
         if idx in self._eraser_masks:
             self._eraser_masks[idx] = []
         if idx in self._crop_boxes:
@@ -2686,8 +2846,9 @@ class PdfCleanerApp(tk.Tk):
             else:
                 self._crop_boxes.pop(page, None)
         elif kind == "protect":
-            if value:
-                self._protected_boxes[page] = value
+            boxes = _sanitize_norm_boxes(value)
+            if boxes:
+                self._protected_boxes[page] = boxes
             else:
                 self._protected_boxes.pop(page, None)
             self._update_thumb_status(page)
@@ -2707,8 +2868,9 @@ class PdfCleanerApp(tk.Tk):
                 self._crop_boxes[page] = value["crop"]
             else:
                 self._crop_boxes.pop(page, None)
-            if value.get("protect"):
-                self._protected_boxes[page] = value["protect"]
+            protected_boxes = _sanitize_norm_boxes(value.get("protect"))
+            if protected_boxes:
+                self._protected_boxes[page] = protected_boxes
             else:
                 self._protected_boxes.pop(page, None)
             if value.get("skip"):
@@ -2737,7 +2899,7 @@ class PdfCleanerApp(tk.Tk):
     def _recount_edits(self):
         masks = sum(len(v) for v in self._eraser_masks.values())
         crops = len(self._crop_boxes)
-        protected = len(self._protected_boxes)
+        protected = _protected_box_total(self._protected_boxes)
         skipped = len(self._skip_pages)
         rotations = sum(1 for v in self._rotations.values() if v)
         adjustments = len(self._page_adjustments)
@@ -2879,13 +3041,33 @@ class PdfCleanerApp(tk.Tk):
             self._st_color.config(text="")
             self._color_info_lbl.config(text="")
 
+        clean_limit = self._clean_page_limit()
+        limit_skipped = 0
+        if clean_limit is not None:
+            limit_skipped = sum(
+                1
+                for idx in range(clean_limit, self._page_count)
+                if not self._skip_pages.get(idx, False)
+            )
+        skipped_total = len(self._skip_pages) + limit_skipped
+        if hasattr(self, "_st_skip"):
+            if skipped_total > 0:
+                self._st_skip.config(
+                    text=f"{skipped_total} не чистить",
+                    bg=AMBER_BG, padx=6)
+            else:
+                self._st_skip.config(text="", bg="#0a0c12", padx=0)
+
         if self._page_count > 0:
             mode_short = self._mode_var.get().split()[-1] if self._mode_var else "—"
             flags = []
             if self._skip_pages:
                 flags.append(f"{len(self._skip_pages)} не чистить")
-            if self._protected_boxes:
-                flags.append(f"{len(self._protected_boxes)} защ. обл.")
+            if clean_limit is not None:
+                flags.append(f"очистка {clean_limit}/{self._page_count}")
+            protected_count = _protected_box_total(self._protected_boxes)
+            if protected_count:
+                flags.append(f"{protected_count} защ. обл.")
             suffix = ("  ·  " + "  ·  ".join(flags)) if flags else ""
             self._st_right.config(
                 text=f"{self._page_count} стр.  ·  300 dpi  ·  {mode_short}{suffix}")
@@ -2962,7 +3144,9 @@ class PdfCleanerApp(tk.Tk):
         self._cancel_requested = threading.Event()
         self._set_processing_buttons(True)
         self._prog_var.set(0)
+        self._prog_pct_var.set("0%")
         self._sb_status_var.set("Запуск обработки…")
+        self._sync_clean_count_controls()
         self._update_status_bar()
         self._store_current_page_adjustment()
 
@@ -2983,9 +3167,14 @@ class PdfCleanerApp(tk.Tk):
             "rotations":    dict(self._rotations),
             "eraser_masks": {k: list(v) for k, v in self._eraser_masks.items()},
             "crop_boxes":   dict(self._crop_boxes),
-            "protected_boxes": dict(self._protected_boxes),
+            "protected_boxes": {
+                k: _sanitize_norm_boxes(v)
+                for k, v in self._protected_boxes.items()
+                if _protected_box_count(v)
+            },
             "skip_pages":   dict(self._skip_pages),
             "color_pages":  dict(self._color_pages),
+            "clean_page_limit": self._clean_page_limit(),
             "cancel_event": self._cancel_requested,
             "page_adjustments": {
                 k: dict(v) for k, v in self._page_adjustments.items()
@@ -3004,6 +3193,7 @@ class PdfCleanerApp(tk.Tk):
 
             doc   = p["doc"]
             total = len(doc)
+            clean_page_limit = p.get("clean_page_limit")
             cancel_event = p.get("cancel_event")
             out_images = []
             render_dpi = 300
@@ -3022,7 +3212,10 @@ class PdfCleanerApp(tk.Tk):
                 contrast=DEFAULT_CONTRAST,
             )
 
-            self._queue.put(("status", f"Открыт: {total} стр.", TXT1))
+            if clean_page_limit is None:
+                self._queue.put(("status", f"Открыт: {total} стр.", TXT1))
+            else:
+                self._queue.put(("status", f"Открыт: {total} стр.; очистка первых {clean_page_limit}", TXT1))
 
             for page_num in range(total):
                 if cancel_event is not None and cancel_event.is_set():
@@ -3032,7 +3225,9 @@ class PdfCleanerApp(tk.Tk):
                 is_first = (page_num == 0)
                 is_last  = (page_num == total - 1)
                 manual_skip = bool(p["skip_pages"].get(page_num, False))
+                limit_skip = clean_page_limit is not None and page_num >= clean_page_limit
                 skip     = (manual_skip or
+                            limit_skip or
                             (is_first and p["skip_first"]) or
                             (is_last  and p["skip_last"]))
                 is_detected_color = bool(p["color_pages"].get(page_num, False))
@@ -3070,15 +3265,20 @@ class PdfCleanerApp(tk.Tk):
 
                 if skip:
                     pil_img = original_rgb.copy()
-                    if not is_color and not manual_skip:
+                    if not is_color and not manual_skip and not limit_skip:
                         pil_img = pil_img.convert("L")
                     _apply_eraser(pil_img, p["eraser_masks"].get(page_num, []))
                     source = original_rgb if pil_img.mode == "RGB" else original_rgb.convert("L")
                     _restore_protected_region(pil_img, source, protected_box)
                     pil_img = _apply_crop(pil_img, p["crop_boxes"].get(page_num))
                     out_images.append(pil_img)
-                    self._queue.put(("page_status", page_num, "done"))
-                    suffix = " — не чистить" if manual_skip else " — пропущена"
+                    self._queue.put(("page_status", page_num, "skipped" if (manual_skip or limit_skip) else "done"))
+                    if manual_skip:
+                        suffix = " — не чистить"
+                    elif limit_skip:
+                        suffix = " — вне лимита очистки"
+                    else:
+                        suffix = " — пропущена"
                     self._queue.put(("progress", pct, lbl + suffix))
                     continue
 
@@ -3153,7 +3353,9 @@ class PdfCleanerApp(tk.Tk):
                 if kind == "progress":
                     _, pct, text = msg
                     self._prog_var.set(pct)
-                    self._sb_status_var.set(text)
+                    pct_text = f"{int(round(pct))}%"
+                    self._prog_pct_var.set(pct_text)
+                    self._sb_status_var.set(f"{text} · {pct_text}")
 
                 elif kind == "page_status":
                     _, idx, status = msg
@@ -3173,6 +3375,7 @@ class PdfCleanerApp(tk.Tk):
                 elif kind == "done":
                     _, out_path = msg
                     self._prog_var.set(100)
+                    self._prog_pct_var.set("100%")
                     self._sb_status_var.set(f"✅  Готово → {os.path.basename(out_path)}")
                     self._processing = False
                     self._set_processing_buttons(False)
@@ -3223,27 +3426,62 @@ def _sanitize_norm_box(box):
     return (x0, y0, x1, y1)
 
 
+def _looks_like_single_norm_box(value):
+    if isinstance(value, (str, bytes, dict)):
+        return False
+    try:
+        if len(value) != 4:
+            return False
+    except TypeError:
+        return False
+    return not any(isinstance(item, (list, tuple, dict)) for item in value)
+
+
+def _sanitize_norm_boxes(boxes, limit=MAX_PROTECTED_BOXES_PER_PAGE):
+    if not boxes:
+        return []
+    raw_boxes = [boxes] if _looks_like_single_norm_box(boxes) else boxes
+    cleaned = []
+    for raw_box in raw_boxes:
+        box = _sanitize_norm_box(raw_box)
+        if not box:
+            continue
+        cleaned.append(box)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def _protected_box_count(boxes):
+    return len(_sanitize_norm_boxes(boxes))
+
+
+def _protected_box_total(mapping):
+    return sum(_protected_box_count(value) for value in mapping.values())
+
+
 def _restore_protected_region(pil_img, original_img, protected_box):
-    box = _sanitize_norm_box(protected_box)
-    if not box:
+    boxes = _sanitize_norm_boxes(protected_box)
+    if not boxes:
         return pil_img
 
     w, h = pil_img.size
     if w <= 0 or h <= 0:
         return pil_img
 
-    x0, y0, x1, y1 = box
-    left = max(0, min(w - 1, int(x0 * w)))
-    top = max(0, min(h - 1, int(y0 * h)))
-    right = max(left + 1, min(w, int(x1 * w)))
-    bottom = max(top + 1, min(h, int(y1 * h)))
-
     source = original_img
     if source.size != pil_img.size:
         source = source.resize(pil_img.size)
     if source.mode != pil_img.mode:
         source = source.convert(pil_img.mode)
-    pil_img.paste(source.crop((left, top, right, bottom)), (left, top))
+
+    for box in boxes:
+        x0, y0, x1, y1 = box
+        left = max(0, min(w - 1, int(x0 * w)))
+        top = max(0, min(h - 1, int(y0 * h)))
+        right = max(left + 1, min(w, int(x1 * w)))
+        bottom = max(top + 1, min(h, int(y1 * h)))
+        pil_img.paste(source.crop((left, top, right, bottom)), (left, top))
     return pil_img
 
 
