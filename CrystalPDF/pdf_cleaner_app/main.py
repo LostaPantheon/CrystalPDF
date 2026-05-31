@@ -3696,12 +3696,6 @@ class PdfCleanerApp(tk.Tk):
                     p["page_adjustments"],
                     page_num,
                 )
-                page_clean_settings = replace(
-                    clean_settings,
-                    clean_edges=edge_cleanup,
-                    brightness=brightness,
-                    contrast=contrast,
-                )
 
                 # Рендерим страницу в 300 dpi для точной очистки и сохранения размера.
                 page = doc.load_page(page_num)
@@ -3724,6 +3718,12 @@ class PdfCleanerApp(tk.Tk):
                     total,
                     bool(p["edge_clean"]),
                     p["color_pages"],
+                )
+                page_clean_settings = replace(
+                    clean_settings,
+                    clean_edges=edge_cleanup,
+                    brightness=brightness,
+                    contrast=contrast,
                 )
 
                 pct = (page_num + 1) / total * 100
