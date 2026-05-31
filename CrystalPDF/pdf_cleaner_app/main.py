@@ -306,7 +306,7 @@ class PdfCleanerApp(tk.Tk):
         self._zoom        = 1.0
         self._tool        = "pan"         # "view" | "pan" | "eraser" | "crop" | "protect"
         self._sidebar_collapsed = False
-        self._sidebar_width = self._ui.px(292)
+        self._sidebar_width = self._ui.px(326)
         self._sidebar_resize_start = None
         self._page_photo  = None          # ImageTk.PhotoImage текущей страницы
         self._pan_x       = 0
@@ -655,7 +655,7 @@ class PdfCleanerApp(tk.Tk):
 
     def _set_sidebar_width(self, width, render=True):
         win_w = max(1, self.winfo_width())
-        min_w = self._ui.px(230)
+        min_w = self._ui.px(270)
         max_w = max(min_w, min(self._ui.px(470), win_w - self._ui.px(64)))
         previous_width = self._sidebar_width
         self._sidebar_width = max(min_w, min(int(width), max_w))
@@ -666,7 +666,7 @@ class PdfCleanerApp(tk.Tk):
             and abs(self._sidebar_width - previous_width) >= self._ui.px(12)
         ):
             hint_width = max(self._ui.px(190), self._sidebar_width - self._ui.px(56))
-            for widget in (self._mode_hint_lbl, self._color_info_lbl):
+            for widget in (self._mode_hint_lbl, self._color_info_lbl, self._clean_limit_hint_lbl):
                 try:
                     widget.config(wraplength=hint_width)
                 except tk.TclError:
@@ -753,9 +753,10 @@ class PdfCleanerApp(tk.Tk):
         sc.bind_all("<Button-5>", self._sidebar_mousewheel)
 
         # ── Файл ──────────────────────────────────────────────────────────────
-        self._section(inner, "Файл")
-        file_sec = tk.Frame(inner, bg=BG1)
-        file_sec.pack(fill="x", padx=12, pady=(6, 12))
+        file_sec = self._sidebar_card(
+            inner, "Документ",
+            "Основной PDF, статус выбранного файла и путь сохранения.",
+            BLUE)
 
         self._import_btn = styled_btn(file_sec, "⬆  Импорт PDF",
                                       self._browse_input, fg=BLUE, bg=BLUE_BG,
@@ -771,14 +772,6 @@ class PdfCleanerApp(tk.Tk):
         self._export_btn.pack(fill="x", pady=(0, 5))
         self._export_btn.config(highlightbackground=GREEN_BDR)
 
-        self._import_folder_btn = styled_btn(
-            file_sec, "Папка сканов -> PDF",
-            self._browse_image_folder,
-            fg=CYAN, bg=CYAN_BG,
-            padx=12, pady=7, font_size=9)
-        self._import_folder_btn.pack(fill="x", pady=(0, 5))
-        self._import_folder_btn.config(highlightbackground=CYAN_BDR)
-
         # Чип выбранного файла
         self._file_chip = tk.Label(
             file_sec, text="нет файла",
@@ -786,16 +779,13 @@ class PdfCleanerApp(tk.Tk):
             anchor="w", padx=8, pady=5,
             relief="flat",
             highlightthickness=1, highlightbackground=BDR)
-        self._file_chip.pack(fill="x")
-        sep(inner)
+        self._file_chip.pack(fill="x", pady=(0, 8))
 
         # ── Выходной файл ──────────────────────────────────────────────────────
-        self._section(inner, "Выходной файл")
-        out_sec = tk.Frame(inner, bg=BG1)
-        out_sec.pack(fill="x", padx=12, pady=(6, 12))
+        self._sidebar_field_label(file_sec, "Выходной файл")
 
         self.output_var = tk.StringVar()
-        out_row = tk.Frame(out_sec, bg=BG1)
+        out_row = tk.Frame(file_sec, bg=BG1)
         out_row.pack(fill="x")
         out_entry = tk.Entry(out_row, textvariable=self.output_var,
                              font=("Segoe UI", 9), fg=TXT0, bg=BG0,
@@ -805,12 +795,40 @@ class PdfCleanerApp(tk.Tk):
         styled_btn(out_row, "…", self._browse_output_dlg,
                    fg=TXT1, bg=BG3, pady=5, padx=8, width=3
                    ).pack(side="left", padx=(4, 0))
-        sep(inner)
+
+        # ── Импорт изображений ────────────────────────────────────────────────
+        image_sec = self._sidebar_card(
+            inner, "Импорт изображений",
+            "Соберите PDF из отдельных сканов: PNG, JPG, TIFF, BMP или WEBP.",
+            CYAN)
+        self._import_folder_btn = styled_btn(
+            image_sec, "Папка сканов -> PDF",
+            self._browse_image_folder,
+            fg=CYAN, bg=CYAN_BG,
+            padx=12, pady=8, font_size=10)
+        self._import_folder_btn.pack(fill="x")
+        self._import_folder_btn.config(highlightbackground=CYAN_BDR)
+
+        self.edge_clean_var  = tk.BooleanVar(value=True)
+        self.deskew_var      = tk.BooleanVar(value=True)
+        self.skip_first_var  = tk.BooleanVar(value=True)
+        self.skip_last_var   = tk.BooleanVar(value=True)
+        self.keep_color_var  = tk.BooleanVar(value=True)
+        self.split_pages_var = tk.BooleanVar(value=False)
+        self.clean_limit_var = tk.BooleanVar(value=False)
+        self.clean_count_var = tk.IntVar(value=1)
+        self.compress_pdf_var = tk.BooleanVar(value=False)
+        self.compression_level_var = tk.StringVar(value=COMPRESSION_LEVELS["medium"]["label"])
+        self.compression_scope_var = tk.StringVar(value=COMPRESSION_SCOPES["all"])
+        self.edge_clean_var.trace_add("write", self._on_edge_zone_change)
+        self.clean_limit_var.trace_add("write", self._on_clean_limit_change)
+        self.clean_count_var.trace_add("write", self._on_clean_limit_change)
 
         # ── Режим очистки ─────────────────────────────────────────────────────
-        self._section(inner, "Режим очистки")
-        mode_sec = tk.Frame(inner, bg=BG1)
-        mode_sec.pack(fill="x", padx=12, pady=(6, 12))
+        mode_sec = self._sidebar_card(
+            inner, "Очистка",
+            "Режим, базовые правила обработки и сохранение цветных страниц.",
+            BLUE)
 
         self._mode_var = tk.StringVar(value="⚡  Стандартная")
         self._mode_hints = {
@@ -836,14 +854,50 @@ class PdfCleanerApp(tk.Tk):
         self._mode_hint_lbl = tk.Label(
             mode_sec, text=self._mode_hints["⚡  Стандартная"],
             font=("Segoe UI", 8), fg=TXT3, bg=BG1, anchor="w",
-            wraplength=196, justify="left")
+            wraplength=max(self._ui.px(210), self._sidebar_width - self._ui.px(58)),
+            justify="left")
         self._mode_hint_lbl.pack(fill="x", pady=(4, 0))
-        sep(inner)
+
+        self._sidebar_field_label(mode_sec, "Правила очистки")
+        self._chk(mode_sec, "Очистка краёв (линии сканера)", self.edge_clean_var)
+        self._chk(mode_sec, "Выравнивание наклона (deskew)", self.deskew_var)
+        self._chk(mode_sec, "Пропустить первую стр.", self.skip_first_var)
+        self._chk(mode_sec, "Пропустить последнюю стр.", self.skip_last_var)
+
+        color_row = tk.Frame(mode_sec, bg=BG1)
+        color_row.pack(fill="x", pady=(6, 0))
+        self._color_chk_var = tk.BooleanVar(value=True)
+        color_chk = tk.Checkbutton(
+            color_row, variable=self.keep_color_var,
+            bg=BG1, activebackground=BG1,
+            fg=TXT1, activeforeground=TXT0,
+            selectcolor=BG0,
+            font=("Segoe UI", 9),
+            text="Сохранить цветные стр.",
+            anchor="w", command=self._on_color_toggle)
+        color_chk.pack(side="left")
+        tk.Label(color_row, text="RGB", font=("Courier New", 8, "bold"),
+                 fg=AMBER, bg=AMBER_BG,
+                 padx=5, pady=1,
+                 relief="flat",
+                 highlightthickness=1,
+                 highlightbackground=AMBER_BDR).pack(side="left", padx=(4, 0))
+
+        self._color_info_lbl = tk.Label(
+            mode_sec, text="",
+            font=("Segoe UI", 8), fg=AMBER, bg=AMBER_BG,
+            anchor="w", padx=6, pady=4,
+            wraplength=max(self._ui.px(210), self._sidebar_width - self._ui.px(58)),
+            justify="left",
+            relief="flat",
+            highlightthickness=1, highlightbackground=AMBER_BDR)
+        self._color_info_lbl.pack(fill="x", pady=(5, 0))
 
         # ── Параметры ─────────────────────────────────────────────────────────
-        self._section(inner, "Параметры")
-        par_sec = tk.Frame(inner, bg=BG1)
-        par_sec.pack(fill="x", padx=12, pady=(6, 12))
+        par_sec = self._sidebar_card(
+            inner, "Тонкая настройка",
+            "Ручные параметры для сложных сканов. Оставьте стандартные, если результат нормальный.",
+            AMBER)
 
         self.dot_var     = tk.IntVar(value=25)
         self.denoise_var = tk.IntVar(value=12)
@@ -900,33 +954,12 @@ class PdfCleanerApp(tk.Tk):
         make_slider(par_sec, "Макс. угол наклона (°)",
                     self.angle_var, 1, 30,
                     "Страницы с бо́льшим наклоном не выравниваются", BG1)
-        sep(inner)
 
         # ── Страницы ──────────────────────────────────────────────────────────
-        self._section(inner, "Страницы")
-        pg_sec = tk.Frame(inner, bg=BG1)
-        pg_sec.pack(fill="x", padx=12, pady=(6, 12))
-
-        self.edge_clean_var  = tk.BooleanVar(value=True)
-        self.deskew_var      = tk.BooleanVar(value=True)
-        self.skip_first_var  = tk.BooleanVar(value=True)
-        self.skip_last_var   = tk.BooleanVar(value=True)
-        self.keep_color_var  = tk.BooleanVar(value=True)
-        self.split_pages_var = tk.BooleanVar(value=False)
-        self.clean_limit_var = tk.BooleanVar(value=False)
-        self.clean_count_var = tk.IntVar(value=1)
-        self.compress_pdf_var = tk.BooleanVar(value=False)
-        self.compression_level_var = tk.StringVar(value=COMPRESSION_LEVELS["medium"]["label"])
-        self.compression_scope_var = tk.StringVar(value=COMPRESSION_SCOPES["all"])
-        self.edge_clean_var.trace_add("write", self._on_edge_zone_change)
-        self.clean_limit_var.trace_add("write", self._on_clean_limit_change)
-        self.clean_count_var.trace_add("write", self._on_clean_limit_change)
-
-        self._chk(pg_sec, "Очистка краёв (линии сканера)", self.edge_clean_var)
-        self._chk(pg_sec, "Выравнивание наклона (deskew)",  self.deskew_var)
-        self._chk(pg_sec, "Пропустить первую стр.",         self.skip_first_var)
-        self._chk(pg_sec, "Пропустить последнюю стр.",      self.skip_last_var)
-        self._chk(pg_sec, "Разбить результат на страницы",  self.split_pages_var)
+        pg_sec = self._sidebar_card(
+            inner, "Диапазон очистки",
+            "Ограничьте обработку первыми страницами, если часть документа трогать не нужно.",
+            GREEN)
 
         clean_count_row = tk.Frame(pg_sec, bg=BG1)
         clean_count_row.pack(fill="x", pady=(8, 0))
@@ -955,43 +988,18 @@ class PdfCleanerApp(tk.Tk):
         self._clean_limit_hint_lbl = tk.Label(
             pg_sec, text="",
             font=("Segoe UI", 8), fg=TXT3, bg=BG1,
-            anchor="w", wraplength=190, justify="left")
+            anchor="w",
+            wraplength=max(self._ui.px(210), self._sidebar_width - self._ui.px(58)),
+            justify="left")
         self._clean_limit_hint_lbl.pack(fill="x", pady=(3, 0))
         self._sync_clean_count_controls()
 
-        # «Сохранить цветные» с золотым бейджем
-        color_row = tk.Frame(pg_sec, bg=BG1)
-        color_row.pack(fill="x", pady=(4, 0))
-        self._color_chk_var = tk.BooleanVar(value=True)
-        color_chk = tk.Checkbutton(
-            color_row, variable=self.keep_color_var,
-            bg=BG1, activebackground=BG1,
-            fg=TXT1, activeforeground=TXT0,
-            selectcolor=BG0,
-            font=("Segoe UI", 9),
-            text="Сохранить цветные стр.",
-            anchor="w", command=self._on_color_toggle)
-        color_chk.pack(side="left")
-        tk.Label(color_row, text="RGB", font=("Courier New", 8, "bold"),
-                 fg=AMBER, bg=AMBER_BG,
-                 padx=5, pady=1,
-                 relief="flat",
-                 highlightthickness=1,
-                 highlightbackground=AMBER_BDR).pack(side="left", padx=(4, 0))
+        compress_sec = self._sidebar_card(
+            inner, "Экспорт",
+            "Формат сохранения результата и сжатие PDF.",
+            GREEN)
 
-        self._color_info_lbl = tk.Label(
-            pg_sec, text="",
-            font=("Segoe UI", 8), fg=AMBER, bg=AMBER_BG,
-            anchor="w", padx=6, pady=4, wraplength=190,
-            justify="left",
-            relief="flat",
-            highlightthickness=1, highlightbackground=AMBER_BDR)
-        self._color_info_lbl.pack(fill="x", pady=(5, 0))
-
-        sep(inner)
-        self._section(inner, "Сжатие")
-        compress_sec = tk.Frame(inner, bg=BG1)
-        compress_sec.pack(fill="x", padx=12, pady=(6, 12))
+        self._chk(compress_sec, "Разбить результат на страницы", self.split_pages_var)
 
         tk.Checkbutton(
             compress_sec, variable=self.compress_pdf_var,
@@ -1026,10 +1034,10 @@ class PdfCleanerApp(tk.Tk):
             font=("Segoe UI", 9),
         ).pack(fill="x")
 
-        sep(inner)
-        self._section(inner, "Текущая страница")
-        page_ops = tk.Frame(inner, bg=BG1)
-        page_ops.pack(fill="x", padx=12, pady=(6, 12))
+        page_ops = self._sidebar_card(
+            inner, "Текущая страница",
+            "Действия только с выбранной страницей: добавить, разрезать, защитить или удалить.",
+            RED)
 
         styled_btn(page_ops, "+  Добавить страницу",
                    self._add_pages_after_current,
@@ -1343,6 +1351,57 @@ class PdfCleanerApp(tk.Tk):
         tk.Label(f, text=text.upper(),
                  font=("Segoe UI", 8, "bold"), fg=TXT3, bg=BG2,
                  anchor="w").pack(fill="x", padx=12, pady=5)
+
+    def _sidebar_card(self, parent, title, subtitle=None, accent=BLUE):
+        outer = tk.Frame(parent, bg=BG1)
+        outer.pack(fill="x", padx=10, pady=(10, 0))
+
+        card = tk.Frame(
+            outer, bg=BG1,
+            highlightthickness=1,
+            highlightbackground=BDR,
+        )
+        card.pack(fill="x")
+
+        header = tk.Frame(card, bg=BG2)
+        header.pack(fill="x")
+        tk.Frame(header, bg=accent, width=self._ui.px(3), height=self._ui.px(18)).pack(
+            side="left", padx=(10, 8), pady=9)
+        tk.Label(
+            header, text=title.upper(),
+            font=("Segoe UI", 8, "bold"),
+            fg=TXT1, bg=BG2,
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True, pady=8)
+
+        body = tk.Frame(card, bg=BG1)
+        body.pack(fill="x", padx=10, pady=(8, 10))
+        if subtitle:
+            tk.Label(
+                body, text=subtitle,
+                font=("Segoe UI", 8),
+                fg=TXT3, bg=BG1,
+                anchor="w", justify="left",
+                wraplength=max(self._ui.px(210), self._sidebar_width - self._ui.px(58)),
+            ).pack(fill="x", pady=(0, 8))
+        return body
+
+    def _sidebar_field_label(self, parent, text):
+        tk.Label(
+            parent, text=text,
+            font=("Segoe UI", 8, "bold"),
+            fg=TXT2, bg=BG1,
+            anchor="w",
+        ).pack(fill="x", pady=(8, 3))
+
+    def _sidebar_hint(self, parent, text, fg=TXT3, bg=BG1, pady=(4, 0)):
+        tk.Label(
+            parent, text=text,
+            font=("Segoe UI", 8),
+            fg=fg, bg=bg,
+            anchor="w", justify="left",
+            wraplength=max(self._ui.px(210), self._sidebar_width - self._ui.px(58)),
+        ).pack(fill="x", pady=pady)
 
     def _chk(self, parent, text, variable):
         f = tk.Frame(parent, bg=BG1)
