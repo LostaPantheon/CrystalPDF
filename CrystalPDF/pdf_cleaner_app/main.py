@@ -1,5 +1,5 @@
 """
-CrystalPDF v7.0 — настольное приложение
+CrystalPDF v1.1.0 — настольное приложение
 ============================================
 Полный рефакторинг под новый интерфейс:
   • Двухпанельная компоновка (сайдбар + предпросмотр)
@@ -9,7 +9,7 @@ CrystalPDF v7.0 — настольное приложение
   • Полоса миниатюр с цветными индикаторами статуса
   • Сохранение цветных страниц без бинаризации
   • Статусы: серый=ожидание, синий=обработка, зелёный=готово, красный=ошибка
-  • Все алгоритмы v6.0: выравнивание наклона, NL-Means, очистка краёв, удаление точек
+  • Все алгоритмы v1.1.0: выравнивание наклона, NL-Means, очистка краёв, удаление точек
 """
 
 import tkinter as tk
@@ -58,11 +58,22 @@ _enable_dpi_awareness()
 DEFAULT_BRIGHTNESS = 0
 DEFAULT_CONTRAST = 100
 DEFAULT_EDGE_MARGIN = 5
+APP_NAME = "CrystalPDF"
+APP_VERSION = "v1.1.0"
+APP_TITLE = f"{APP_NAME} {APP_VERSION}"
 MAX_PROTECTED_BOXES_PER_PAGE = 15
 LARGE_DOCUMENT_PAGE_LIMIT = 300
 AUTO_COLOR_DETECT_PAGE_LIMIT = 250
-ASYNC_PAGE_RENDER_PAGE_LIMIT = 250
+ASYNC_PAGE_RENDER_PAGE_LIMIT = 40
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+PROJECT_SCAN_EXCLUDE_DIRS = {
+    ".git",
+    ".idea",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+}
 COMPRESSION_LEVELS = {
     "light": {"label": "Лёгкое", "dpi": 240, "quality": 88},
     "medium": {"label": "Среднее", "dpi": 200, "quality": 78},
@@ -73,8 +84,8 @@ COMPRESSION_SCOPES = {
     "color": "Только цветные",
     "processed": "Только очищаемые",
 }
-DESKTOP_SHORTCUT_NAME = "CrystalPDF"
-LEGACY_DESKTOP_SHORTCUT_NAMES = ("Mini_Icon_CrystalPDF",)
+DESKTOP_SHORTCUT_NAME = APP_TITLE
+LEGACY_DESKTOP_SHORTCUT_NAMES = ("CrystalPDF", "Mini_Icon_CrystalPDF")
 DESKTOP_SHORTCUT_NEVER_ASK_SETTING = "desktop_shortcut_never_ask"
 LEGACY_DESKTOP_SHORTCUT_PROMPT_DISABLED_SETTING = "desktop_shortcut_prompt_disabled"
 
@@ -273,7 +284,7 @@ class PdfCleanerApp(tk.Tk):
     # ── ИНИЦИАЛИЗАЦИЯ ─────────────────────────────────────────────────────────
     def __init__(self):
         super().__init__()
-        self.title("CrystalPDF")
+        self.title(APP_TITLE)
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         win_w = max(980, min(1320, sw - 90))
@@ -346,6 +357,7 @@ class PdfCleanerApp(tk.Tk):
         self._color_detecting = False
         self._color_detect_scanned = 0
         self._color_detect_total = 0
+        self._project_scan_watch_job = None
         self._skip_pages = {}
         self._page_adjustments = {}
         self._adjustment_controls_page = None
@@ -384,7 +396,10 @@ class PdfCleanerApp(tk.Tk):
         self._poll_queue()
         self._update_history_buttons()
         self._update_status_bar()
-        self.after(600, self._maybe_prompt_desktop_shortcut)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(250, self._handle_startup_source)
+        self._project_scan_watch_job = self.after(3000, self._watch_project_scan_folder)
+        self.after(650, self._maybe_prompt_desktop_shortcut)
 
     # ── ОКНО СОЗДАНИЯ ЯРЛЫКА ──────────────────────────────────────────────────
     def _settings_path(self):
@@ -455,7 +470,7 @@ class PdfCleanerApp(tk.Tk):
 
     def _show_desktop_shortcut_prompt(self, settings):
         dialog = tk.Toplevel(self)
-        dialog.title("Ярлык CrystalPDF")
+        dialog.title(f"Ярлык {APP_TITLE}")
         dialog.configure(bg=BG1)
         dialog.resizable(False, False)
         dialog.transient(self)
@@ -474,7 +489,7 @@ class PdfCleanerApp(tk.Tk):
         ).pack(anchor="w")
         tk.Label(
             frame,
-            text=f"Будет создан ярлык «{DESKTOP_SHORTCUT_NAME}» для быстрого запуска CrystalPDF.",
+            text=f"Будет создан ярлык «{DESKTOP_SHORTCUT_NAME}» для быстрого запуска {APP_TITLE}.",
             font=("Segoe UI", 9), fg=TXT2, bg=BG1,
             wraplength=360, justify="left"
         ).pack(anchor="w", pady=(8, 10))
@@ -558,7 +573,7 @@ class PdfCleanerApp(tk.Tk):
                 f"$Shortcut.TargetPath = {ps_quote(target_path)}",
                 f"$Shortcut.WorkingDirectory = {ps_quote(work_dir)}",
                 f"$Shortcut.IconLocation = {ps_quote(str(icon_path) + ',0')}",
-                "$Shortcut.Description = 'CrystalPDF'",
+                f"$Shortcut.Description = {ps_quote(APP_TITLE)}",
             ]
             if arguments:
                 script.append(f"$Shortcut.Arguments = {ps_quote(arguments)}")
@@ -576,6 +591,137 @@ class PdfCleanerApp(tk.Tk):
             return True, ""
         except Exception as e:
             return False, str(e)
+
+    def _on_close(self):
+        self._cancel_requested.set()
+        self._cancel_thumb_render_job()
+        self._cancel_thumb_build_job()
+        self._cancel_page_render_jobs()
+        if self._project_scan_watch_job is not None:
+            try:
+                self.after_cancel(self._project_scan_watch_job)
+            except Exception:
+                pass
+            self._project_scan_watch_job = None
+        self._color_detect_generation += 1
+        old_doc = self._doc
+        self._doc = None
+        if old_doc is not None:
+            try:
+                old_doc.close()
+            except Exception:
+                pass
+        temp_pdf = self._temporary_import_pdf
+        self._temporary_import_pdf = None
+        if temp_pdf:
+            try:
+                Path(temp_pdf).unlink(missing_ok=True)
+            except Exception:
+                pass
+        self.destroy()
+
+    def _handle_startup_source(self):
+        if self._doc is not None or self._importing or self._processing:
+            return
+
+        source = self._startup_source_from_argv()
+        if source is None:
+            source = self._find_project_scan_folder()
+        if source is None:
+            return
+
+        if source.is_file() and source.suffix.lower() == ".pdf":
+            self.output_var.set(str(self._default_output_path(source)))
+            self._load_pdf(str(source))
+            return
+
+        if source.is_dir():
+            output_path = self._project_scan_output_path(source)
+            if output_path is None:
+                existing_pdf = source.with_suffix(".pdf")
+                if existing_pdf.exists():
+                    self.output_var.set(str(self._default_output_path(existing_pdf)))
+                    self._load_pdf(str(existing_pdf))
+                return
+            self.output_var.set(str(output_path))
+            self._load_image_folder(str(source), save_path=output_path)
+
+    def _watch_project_scan_folder(self):
+        self._project_scan_watch_job = None
+        try:
+            if self._doc is None and not self._importing and not self._processing:
+                source = self._find_project_scan_folder()
+                if source is not None:
+                    output_path = self._project_scan_output_path(source)
+                    if output_path is not None:
+                        self.output_var.set(str(output_path))
+                        self._load_image_folder(str(source), save_path=output_path)
+                        return
+        finally:
+            if self._doc is None and not self._importing and not self._processing:
+                self._project_scan_watch_job = self.after(3000, self._watch_project_scan_folder)
+
+    def _startup_source_from_argv(self):
+        for raw_arg in sys.argv[1:]:
+            if not raw_arg:
+                continue
+            path = Path(raw_arg.strip('"')).expanduser()
+            if path.exists():
+                return path
+        return None
+
+    def _find_project_scan_folder(self):
+        roots = []
+        for root in (Path(__file__).resolve().parent, Path.cwd()):
+            if root.exists() and root not in roots:
+                roots.append(root)
+
+        candidates = []
+        for root in roots:
+            try:
+                children = list(root.iterdir())
+            except Exception:
+                continue
+            for child in children:
+                if not child.is_dir() or child.name in PROJECT_SCAN_EXCLUDE_DIRS:
+                    continue
+                if child.name.startswith("."):
+                    continue
+                if not _list_image_files(child, recursive=False):
+                    continue
+                output_path = self._project_scan_output_path(child)
+                if output_path is None:
+                    continue
+                candidates.append(child)
+
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            try:
+                key = candidate.resolve()
+            except Exception:
+                key = candidate
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+
+        return unique[0] if len(unique) == 1 else None
+
+    def _project_scan_output_path(self, folder):
+        folder = Path(folder)
+        images = _list_image_files(folder, recursive=True)
+        if not images:
+            return None
+        output_path = folder.with_suffix(".pdf")
+        if output_path.exists():
+            try:
+                newest_image = max(path.stat().st_mtime for path in images)
+                if output_path.stat().st_mtime >= newest_image:
+                    return None
+            except Exception:
+                pass
+        return output_path
 
     # ── СБОРКА ИНТЕРФЕЙСА ─────────────────────────────────────────────────────
     def _build_ui(self):
@@ -627,7 +773,7 @@ class PdfCleanerApp(tk.Tk):
         self._btn_sidebar.pack(side="left", padx=(12, 0), pady=6)
 
         self._title_label = tk.Label(
-            tb, text="✦  CrystalPDF  ·  нет файла",
+            tb, text=f"✦  {APP_TITLE}  ·  нет файла",
             font=("Courier New", 10), fg=TXT2, bg="#0a0c12")
         self._title_label.pack(side="left", padx=(14, 0))
 
@@ -725,10 +871,10 @@ class PdfCleanerApp(tk.Tk):
         # Логотип
         logo = tk.Frame(sb, bg=BG1)
         logo.pack(fill="x")
-        tk.Label(logo, text="✦  CrystalPDF",
+        tk.Label(logo, text=f"✦  {APP_NAME}",
                  font=("Segoe UI", 13, "bold"), fg=TXT0, bg=BG1,
                  anchor="w").pack(fill="x", padx=14, pady=(14, 2))
-        tk.Label(logo, text="v7.0 — очистка сканов",
+        tk.Label(logo, text=f"{APP_VERSION} — очистка сканов",
                  font=("Courier New", 9), fg=TXT3, bg=BG1,
                  anchor="w").pack(fill="x", padx=14, pady=(0, 12))
         sep(sb)
@@ -1478,8 +1624,9 @@ class PdfCleanerApp(tk.Tk):
                 "Нет изображений",
                 "В выбранной папке не найдены PNG/JPG/TIFF/BMP/WEBP файлы.")
             return
-        self.output_var.set(str(self._default_output_path(folder)))
-        self._load_image_folder(folder)
+        output_path = self._unique_output_path(self._default_output_path(folder))
+        self.output_var.set(str(output_path))
+        self._load_image_folder(folder, save_path=output_path)
 
     def _browse_output(self):
         path = filedialog.asksaveasfilename(
@@ -2246,7 +2393,7 @@ class PdfCleanerApp(tk.Tk):
             daemon=True,
         ).start()
 
-    def _load_image_folder(self, folder):
+    def _load_image_folder(self, folder, save_path=None):
         if self._processing:
             messagebox.showwarning(
                 "Подождите",
@@ -2260,7 +2407,7 @@ class PdfCleanerApp(tk.Tk):
         self._set_importing_ui(True, folder)
         threading.Thread(
             target=self._run_image_folder_import,
-            args=(folder, generation),
+            args=(folder, generation, save_path),
             daemon=True,
         ).start()
 
@@ -2277,6 +2424,9 @@ class PdfCleanerApp(tk.Tk):
                     pass
                 self._color_detect_job = None
             self._color_detect_generation += 1
+            self._color_detecting = False
+            self._color_detect_scanned = 0
+            self._color_detect_total = 0
             self._prog_var.set(0)
             self._prog_pct_var.set("0%")
             self._sb_status_var.set("Импортирование: открытие PDF")
@@ -2361,13 +2511,16 @@ class PdfCleanerApp(tk.Tk):
                     pass
             self._queue.put(("import_error", generation, str(e)))
 
-    def _run_image_folder_import(self, folder, generation):
+    def _run_image_folder_import(self, folder, generation, save_path=None):
         temp_path = None
         doc = None
+        final_path = None
+        cancelled = False
         try:
             import fitz
             import io
-            from PIL import Image, ImageOps
+            from PIL import Image, ImageFile, ImageOps
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
 
             image_paths = _list_image_files(folder)
             if not image_paths:
@@ -2378,33 +2531,42 @@ class PdfCleanerApp(tk.Tk):
             target = fitz.open()
             try:
                 total = len(image_paths)
+                imported_count = 0
+                skipped_images = []
                 for index, image_path in enumerate(image_paths, start=1):
                     if generation != self._import_generation:
-                        return
+                        cancelled = True
+                        break
 
-                    with Image.open(image_path) as source:
-                        image = ImageOps.exif_transpose(source)
-                        if image.mode not in ("RGB", "L"):
-                            image = image.convert("RGB")
-                        if image.mode == "L":
-                            image = image.convert("RGB")
+                    try:
+                        with Image.open(image_path) as source:
+                            image = ImageOps.exif_transpose(source)
+                            if image.mode not in ("RGB", "L"):
+                                image = image.convert("RGB")
+                            if image.mode == "L":
+                                image = image.convert("RGB")
+                            image.load()
 
-                        dpi = image.info.get("dpi") or (300, 300)
-                        try:
-                            xdpi = float(dpi[0])
-                            ydpi = float(dpi[1])
-                        except Exception:
-                            xdpi = ydpi = 300.0
-                        xdpi = max(72.0, min(600.0, xdpi or 300.0))
-                        ydpi = max(72.0, min(600.0, ydpi or 300.0))
+                            dpi = image.info.get("dpi") or (300, 300)
+                            try:
+                                xdpi = float(dpi[0])
+                                ydpi = float(dpi[1])
+                            except Exception:
+                                xdpi = ydpi = 300.0
+                            xdpi = max(72.0, min(600.0, xdpi or 300.0))
+                            ydpi = max(72.0, min(600.0, ydpi or 300.0))
 
-                        page_w = max(1.0, image.width / xdpi * 72.0)
-                        page_h = max(1.0, image.height / ydpi * 72.0)
-                        buffer = io.BytesIO()
-                        image.save(buffer, format="JPEG", quality=95, optimize=True)
+                            page_w = max(1.0, image.width / xdpi * 72.0)
+                            page_h = max(1.0, image.height / ydpi * 72.0)
+                            buffer = io.BytesIO()
+                            image.save(buffer, format="JPEG", quality=95, optimize=True)
+                    except Exception as image_error:
+                        skipped_images.append(f"{Path(image_path).name}: {image_error}")
+                        continue
 
                     page = target.new_page(width=page_w, height=page_h)
                     page.insert_image(page.rect, stream=buffer.getvalue())
+                    imported_count += 1
 
                     if index == 1 or index % 10 == 0 or index == total:
                         pct = 5.0 + (index / max(1, total)) * 90.0
@@ -2415,11 +2577,37 @@ class PdfCleanerApp(tk.Tk):
                             f"Сборка PDF из сканов: {index}/{total}",
                         ))
 
-                target.save(temp_path, garbage=4, deflate=True, clean=True)
+                if imported_count <= 0:
+                    details = "\n".join(skipped_images[:8])
+                    raise ValueError(
+                        "Не удалось прочитать изображения в папке."
+                        + (f"\n\n{details}" if details else "")
+                    )
+
+                if not cancelled:
+                    target.save(temp_path, garbage=4, deflate=True, clean=True)
             finally:
                 target.close()
 
-            doc = fitz.open(temp_path)
+            if cancelled:
+                if temp_path:
+                    try:
+                        Path(temp_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return
+
+            render_source_path = temp_path
+            temporary_pdf = temp_path
+            if save_path:
+                final_path = Path(save_path)
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                Path(temp_path).replace(final_path)
+                temp_path = None
+                render_source_path = str(final_path)
+                temporary_pdf = None
+
+            doc = fitz.open(render_source_path)
             self._queue.put((
                 "import_opened",
                 generation,
@@ -2428,8 +2616,10 @@ class PdfCleanerApp(tk.Tk):
                 len(doc),
                 {
                     "display_path": folder,
-                    "render_source_path": temp_path,
-                    "temporary_pdf": temp_path,
+                    "render_source_path": render_source_path,
+                    "temporary_pdf": temporary_pdf,
+                    "generated_pdf": str(final_path) if final_path else None,
+                    "skipped_images": skipped_images,
                 },
             ))
         except Exception as e:
@@ -2504,24 +2694,40 @@ class PdfCleanerApp(tk.Tk):
         self._sync_clean_count_controls()
 
         fname = os.path.basename(str(self._input_path))
-        self._title_label.config(text=f"✦  CrystalPDF  ·  {fname}")
+        self._title_label.config(text=f"✦  {APP_TITLE}  ·  {fname}")
         self._file_chip.config(text=fname, fg=TXT1)
 
         self._build_thumb_widgets_async(
             generation,
-            done_callback=lambda: self._finish_import_success(generation, path),
+            done_callback=lambda: self._finish_import_success(generation, path, meta),
         )
 
-    def _finish_import_success(self, generation, path):
+    def _finish_import_success(self, generation, path, meta=None):
         if generation != self._import_generation:
             return
+        meta = meta or {}
         self._set_importing_ui(False)
         self._go_page(0)
         self._prog_var.set(100)
         self._prog_pct_var.set("100%")
-        self._sb_status_var.set(
-            f"Импортировано: {os.path.basename(path)} · {self._page_count} стр.")
+        generated_pdf = meta.get("generated_pdf")
+        skipped_images = list(meta.get("skipped_images") or [])
+        if generated_pdf:
+            self._sb_status_var.set(
+                f"PDF создан: {os.path.basename(generated_pdf)} · {self._page_count} стр."
+                + (f" · пропущено {len(skipped_images)}" if skipped_images else ""))
+        else:
+            self._sb_status_var.set(
+                f"Импортировано: {os.path.basename(path)} · {self._page_count} стр."
+                + (f" · пропущено {len(skipped_images)}" if skipped_images else ""))
         self._update_status_bar()
+        if skipped_images:
+            preview = "\n".join(skipped_images[:8])
+            if len(skipped_images) > 8:
+                preview += f"\n...и ещё {len(skipped_images) - 8}"
+            messagebox.showwarning(
+                "Часть сканов пропущена",
+                "PDF собран, но некоторые файлы не удалось прочитать:\n\n" + preview)
         self._schedule_color_detection(self._render_source_path or path, delay=900)
 
     def _finish_import_error(self, generation, error_text):
@@ -2537,6 +2743,8 @@ class PdfCleanerApp(tk.Tk):
             else:
                 self._file_chip.config(text="нет файла", fg=TXT3)
         self._update_status_bar()
+        if self._doc is None and self._project_scan_watch_job is None:
+            self._project_scan_watch_job = self.after(3000, self._watch_project_scan_folder)
         messagebox.showerror("Ошибка открытия", error_text)
 
     def _schedule_color_detection(self, source_path=None, delay=500, pdf_bytes=None):
@@ -2553,10 +2761,13 @@ class PdfCleanerApp(tk.Tk):
         self._color_detect_scanned = 0
         self._color_detect_total = max(0, int(self._page_count or 0))
         self._update_status_bar()
-        if False and self._page_count > AUTO_COLOR_DETECT_PAGE_LIMIT:
+        if self._page_count > AUTO_COLOR_DETECT_PAGE_LIMIT:
+            self._color_detecting = False
+            self._color_detect_scanned = 0
             if hasattr(self, "_color_info_lbl"):
                 self._color_info_lbl.config(
-                    text="Р¦РІРµС‚ Р±СѓРґРµС‚ РѕРїСЂРµРґРµР»СЏС‚СЊСЃСЏ РїРѕСЃС‚СЂР°РЅРёС‡РЅРѕ РїСЂРё РѕР±СЂР°Р±РѕС‚РєРµ")
+                    text="Цвет будет определяться постранично при обработке")
+            self._update_status_bar()
             return
 
         def start_detection():
@@ -2605,12 +2816,13 @@ class PdfCleanerApp(tk.Tk):
                         detected[i] = False
                     if (i + 1) % 25 == 0:
                         self._queue.put(("color_detect_partial", generation, dict(detected)))
+                        self._queue.put(("color_detect_progress", generation, i + 1, total))
             finally:
                 doc.close()
 
             self._queue.put(("color_detect_done", generation, detected))
         except Exception:
-            pass
+            self._queue.put(("color_detect_done", generation, {}))
 
     # ── ВИДЖЕТЫ МИНИАТЮР ──────────────────────────────────────────────────────
     def _bind_thumb_click(self, widget, idx):
@@ -2655,6 +2867,9 @@ class PdfCleanerApp(tk.Tk):
         self._update_thumb_status(i)
 
     def _build_thumb_widgets(self):
+        if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT:
+            self._build_thumb_widgets_async(self._import_generation)
+            return
         self._cancel_thumb_render_job()
         self._cancel_thumb_build_job()
         for w in self._thumb_inner.winfo_children():
@@ -2703,7 +2918,7 @@ class PdfCleanerApp(tk.Tk):
                 callback()
             return
 
-        batch_size = 120 if total > 1000 else 80 if total > 300 else 45
+        batch_size = 80 if total > 1000 else 60 if total > 300 else 45
         end = min(total, start + batch_size)
         for i in range(start, end):
             self._create_thumb_widget(i)
@@ -2715,7 +2930,8 @@ class PdfCleanerApp(tk.Tk):
         self._sb_status_var.set(f"Импортирование: страницы {end}/{total}")
 
         if end < total:
-            self._thumb_build_job = self.after(1, self._build_thumb_widgets_batch)
+            delay = 16 if total > 1000 else 8 if total > 300 else 1
+            self._thumb_build_job = self.after(delay, self._build_thumb_widgets_batch)
             return
 
         callback = self._thumb_build_done_callback
@@ -4263,6 +4479,15 @@ class PdfCleanerApp(tk.Tk):
             self._st_color.config(text=f"🎨 {color_count} цветных стр.")
             self._color_info_lbl.config(
                 text=f"{color_count} цветных стр. будут сохранены без конвертации")
+        elif self._color_detecting:
+            scanned = max(0, int(self._color_detect_scanned))
+            total = max(0, int(self._color_detect_total))
+            self._st_color.config(text=f"цвет {scanned}/{total}" if total else "цвет")
+            self._color_info_lbl.config(text="Идёт фоновое определение цветных страниц")
+        elif self._page_count > AUTO_COLOR_DETECT_PAGE_LIMIT:
+            self._st_color.config(text="")
+            self._color_info_lbl.config(
+                text="Цвет будет определяться постранично при обработке")
         else:
             self._st_color.config(text="")
             self._color_info_lbl.config(text="")
@@ -4310,6 +4535,8 @@ class PdfCleanerApp(tk.Tk):
                 state="disabled", bg=BG3, fg=TXT2)
             if hasattr(self, "_import_btn"):
                 self._import_btn.config(state="disabled", fg=TXT2, bg=BG2)
+            if hasattr(self, "_import_folder_btn"):
+                self._import_folder_btn.config(state="disabled", fg=TXT2, bg=BG2)
             if hasattr(self, "_cancel_btn"):
                 self._cancel_btn.config(
                     state="normal", fg=RED, bg=RED_BG,
@@ -4330,6 +4557,9 @@ class PdfCleanerApp(tk.Tk):
             if hasattr(self, "_import_btn") and not self._importing:
                 self._import_btn.config(state="normal", fg=BLUE, bg=BLUE_BG,
                                         highlightbackground=BLUE_BDR)
+            if hasattr(self, "_import_folder_btn") and not self._importing:
+                self._import_folder_btn.config(state="normal", fg=CYAN, bg=CYAN_BG,
+                                               highlightbackground=CYAN_BDR)
 
     def _cancel_processing(self):
         if not self._processing:
@@ -4366,9 +4596,14 @@ class PdfCleanerApp(tk.Tk):
         self._update_status_bar()
         self._store_current_page_adjustment()
         self._processing_before_state = self._snapshot_document_state()
+        if not self._processing_before_state:
+            self._processing = False
+            self._set_processing_buttons(False)
+            messagebox.showerror("Ошибка", "Не удалось подготовить PDF к обработке.")
+            return
 
         params = {
-            "doc":          self._doc,
+            "pdf_bytes":    self._processing_before_state["pdf"],
             "dot_limit":    self.dot_var.get(),
             "h_val":        self.denoise_var.get(),
             "edge_clean":   self.edge_clean_var.get(),
@@ -4400,13 +4635,19 @@ class PdfCleanerApp(tk.Tk):
 
     # ── ПОТОК ОБРАБОТКИ ───────────────────────────────────────────────────────
     def _run_processing(self, p):
+        doc = None
+        close_doc = False
         try:
             import fitz
             import cv2
             import numpy as np
             from PIL import Image, ImageEnhance
 
-            doc   = p["doc"]
+            if p.get("pdf_bytes") is not None:
+                doc = fitz.open(stream=p["pdf_bytes"], filetype="pdf")
+                close_doc = True
+            else:
+                doc = p["doc"]
             total = len(doc)
             clean_page_limit = p.get("clean_page_limit")
             cancel_event = p.get("cancel_event")
@@ -4567,6 +4808,12 @@ class PdfCleanerApp(tk.Tk):
         except Exception:
             import traceback
             self._queue.put(("error", traceback.format_exc()))
+        finally:
+            if close_doc and doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
     # ── ОПРОС ОЧЕРЕДИ ─────────────────────────────────────────────────────────
     def _poll_queue(self):
@@ -4632,6 +4879,9 @@ class PdfCleanerApp(tk.Tk):
                 elif kind in ("color_detect_partial", "color_detect_done"):
                     _, generation, color_pages = msg
                     if generation == self._color_detect_generation:
+                        if kind == "color_detect_done":
+                            self._color_detecting = False
+                            self._color_detect_scanned = self._color_detect_total
                         changed_current = False
                         for idx, value in color_pages.items():
                             idx = int(idx)
@@ -4643,6 +4893,13 @@ class PdfCleanerApp(tk.Tk):
                                 )
                         if kind == "color_detect_done" or changed_current:
                             self._render_page()
+                        self._update_status_bar()
+
+                elif kind == "color_detect_progress":
+                    _, generation, scanned, total = msg
+                    if generation == self._color_detect_generation:
+                        self._color_detect_scanned = int(scanned)
+                        self._color_detect_total = int(total)
                         self._update_status_bar()
 
                 elif kind == "session_done":
@@ -5127,6 +5384,39 @@ def _clean_edges(binary, margin, dark_thresh):
             result[:, col] = 255
 
     return result
+
+
+def _natural_sort_key(value):
+    text = str(value).casefold()
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
+
+
+def _is_excluded_scan_path(path, root):
+    try:
+        relative_parts = Path(path).relative_to(root).parts
+    except Exception:
+        relative_parts = Path(path).parts
+    return any(part in PROJECT_SCAN_EXCLUDE_DIRS or part.startswith(".") for part in relative_parts[:-1])
+
+
+def _list_image_files(folder, recursive=True):
+    root = Path(folder)
+    if not root.exists() or not root.is_dir():
+        return []
+
+    try:
+        iterator = root.rglob("*") if recursive else root.iterdir()
+        images = [
+            path
+            for path in iterator
+            if path.is_file()
+            and path.suffix.lower() in IMAGE_EXTENSIONS
+            and not _is_excluded_scan_path(path, root)
+        ]
+    except Exception:
+        return []
+
+    return sorted(images, key=lambda path: _natural_sort_key(path.relative_to(root)))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

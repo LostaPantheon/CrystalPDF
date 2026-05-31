@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title CrystalPDF - сборка EXE
+title CrystalPDF v1.1.0 - сборка EXE
 
 echo.
 echo  ==========================================
-echo       CrystalPDF - установка и сборка
+echo       CrystalPDF v1.1.0 - установка и сборка
 echo  ==========================================
 echo.
 
@@ -34,9 +34,9 @@ if errorlevel 1 (
 
 echo.
 echo  [3/3] Готово.
-echo  EXE: dist\CrystalPDF.exe
+echo  EXE: dist\CrystalPDF-v1.1.0.exe
 echo.
 
-if exist "dist\CrystalPDF.exe" explorer dist
+if exist "dist\CrystalPDF-v1.1.0.exe" explorer dist
 
 pause

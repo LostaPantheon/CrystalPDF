@@ -1,6 +1,6 @@
 # Авторы
 
-CrystalPDF создан и поддерживается авторами:
+CrystalPDF v1.1.0 создан и поддерживается авторами:
 
 - LostaPantheon
 - LAIDUM
