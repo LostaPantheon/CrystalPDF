@@ -465,26 +465,8 @@ def _clean_edges(binary: np.ndarray, margin: int, dark_threshold: int = 60) -> n
 
 def _deskew(gray: np.ndarray, max_angle_deg: float) -> np.ndarray:
     h, w = gray.shape[:2]
-    crop_x = max(1, int(w * 0.04))
-    crop_y = max(1, int(h * 0.04))
-    work = gray[crop_y : h - crop_y, crop_x : w - crop_x]
-
-    _, thresh = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel_width = max(25, int(w / 55))
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1))
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
-    coords = np.column_stack(np.where(dilated > 0))
-
-    if len(coords) < 80:
-        return gray
-
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-
-    if abs(angle) > max_angle_deg or abs(angle) < 0.25:
+    angle = estimate_deskew_angle(gray, max_angle_deg)
+    if abs(angle) < 0.001:
         return gray
 
     center = (w // 2, h // 2)
@@ -497,3 +479,131 @@ def _deskew(gray: np.ndarray, max_angle_deg: float) -> np.ndarray:
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=255,
     )
+
+
+def estimate_deskew_angle(
+    gray: np.ndarray,
+    max_angle_deg: float,
+    min_abs_angle: float = 0.55,
+) -> float:
+    gray = _ensure_uint8(gray)
+    h, w = gray.shape[:2]
+    if h < 80 or w < 80:
+        return 0.0
+
+    try:
+        max_angle = float(max_angle_deg)
+    except (TypeError, ValueError):
+        return 0.0
+    max_angle = max(0.0, min(max_angle, 12.0))
+    if max_angle < min_abs_angle:
+        return 0.0
+
+    crop_x = max(1, int(w * 0.04))
+    crop_y = max(1, int(h * 0.04))
+    work = gray[crop_y : h - crop_y, crop_x : w - crop_x]
+    if work.size == 0:
+        work = gray
+
+    max_dim = max(work.shape[:2])
+    if max_dim > 1200:
+        scale = 1200.0 / float(max_dim)
+        work = cv2.resize(
+            work,
+            (max(1, int(work.shape[1] * scale)), max(1, int(work.shape[0] * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    work = cv2.GaussianBlur(work, (3, 3), 0)
+    _, ink = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    ink = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
+
+    density = float(np.mean(ink > 0))
+    if density < 0.002 or density > 0.35:
+        return 0.0
+    if not _has_text_like_rows(ink):
+        return 0.0
+
+    zero_score = _deskew_projection_score(ink, 0.0)
+    if zero_score <= 0.0:
+        return 0.0
+
+    coarse_step = 0.5
+    candidates = np.arange(-max_angle, max_angle + coarse_step * 0.5, coarse_step)
+    best_angle = 0.0
+    best_score = zero_score
+    for candidate in candidates:
+        score = _deskew_projection_score(ink, float(candidate))
+        if score > best_score:
+            best_angle = float(candidate)
+            best_score = score
+
+    if abs(best_angle) >= min_abs_angle:
+        fine_min = max(-max_angle, best_angle - coarse_step)
+        fine_max = min(max_angle, best_angle + coarse_step)
+        for candidate in np.arange(fine_min, fine_max + 0.051, 0.1):
+            score = _deskew_projection_score(ink, float(candidate))
+            if score > best_score:
+                best_angle = float(candidate)
+                best_score = score
+
+    improvement = (best_score - zero_score) / max(1.0, abs(zero_score))
+    if abs(best_angle) < min_abs_angle or improvement < 0.055:
+        return 0.0
+    return float(round(best_angle, 2))
+
+
+def _has_text_like_rows(ink: np.ndarray) -> bool:
+    h, w = ink.shape[:2]
+    if h <= 0 or w <= 0:
+        return False
+
+    kernel_w = max(18, min(120, w // 28))
+    kernel_h = max(1, min(5, h // 250))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, kernel_h))
+    grouped = cv2.dilate(ink, kernel, iterations=1)
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(grouped, connectivity=8)
+
+    line_count = 0
+    line_weight = 0.0
+    for idx in range(1, num_labels):
+        x = int(stats[idx, cv2.CC_STAT_LEFT])
+        y = int(stats[idx, cv2.CC_STAT_TOP])
+        bw = int(stats[idx, cv2.CC_STAT_WIDTH])
+        bh = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        area = int(stats[idx, cv2.CC_STAT_AREA])
+        if bw < w * 0.10 or bw < bh * 2.5 or bh > h * 0.12 or area < 30:
+            continue
+        if x <= 1 and y <= 1 and bw >= w - 2 and bh >= h - 2:
+            continue
+        line_count += 1
+        line_weight += min(1.0, bw / max(1.0, float(w)))
+
+    return line_count >= 2 or line_weight >= 1.4
+
+
+def _deskew_projection_score(ink: np.ndarray, angle: float) -> float:
+    h, w = ink.shape[:2]
+    if h <= 0 or w <= 0:
+        return 0.0
+
+    if abs(angle) < 0.001:
+        rotated = ink
+    else:
+        matrix = cv2.getRotationMatrix2D((w // 2, h // 2), float(angle), 1.0)
+        rotated = cv2.warpAffine(
+            ink,
+            matrix,
+            (w, h),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+
+    rows = np.count_nonzero(rotated, axis=1).astype(np.float32)
+    if rows.size < 3:
+        return 0.0
+    mean = float(np.mean(rows))
+    if mean <= 0.0:
+        return 0.0
+    return float(np.var(rows) / mean)

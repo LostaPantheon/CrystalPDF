@@ -26,7 +26,7 @@ import json
 import subprocess
 import sys
 
-from pdf_cleaner import CleanSettings, clean_page_image, edge_artifact_mask
+from pdf_cleaner import CleanSettings, clean_page_image, edge_artifact_mask, estimate_deskew_angle
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -57,6 +57,16 @@ DEFAULT_BRIGHTNESS = 0
 DEFAULT_CONTRAST = 100
 DEFAULT_EDGE_MARGIN = 5
 MAX_PROTECTED_BOXES_PER_PAGE = 15
+COMPRESSION_LEVELS = {
+    "light": {"label": "Лёгкое", "dpi": 240, "quality": 88},
+    "medium": {"label": "Среднее", "dpi": 200, "quality": 78},
+    "strong": {"label": "Сильное", "dpi": 150, "quality": 62},
+}
+COMPRESSION_SCOPES = {
+    "all": "Все страницы",
+    "color": "Только цветные",
+    "processed": "Только очищаемые",
+}
 DESKTOP_SHORTCUT_NAME = "CrystalPDF"
 LEGACY_DESKTOP_SHORTCUT_NAMES = ("Mini_Icon_CrystalPDF",)
 DESKTOP_SHORTCUT_NEVER_ASK_SETTING = "desktop_shortcut_never_ask"
@@ -307,6 +317,13 @@ class PdfCleanerApp(tk.Tk):
 
         # Цветные страницы {индекс_страницы: да/нет}
         self._color_pages = {}
+        self._color_detect_generation = 0
+        self._color_detect_job = None
+        self._thumb_containers = {}
+        self._thumb_rendered = set()
+        self._thumb_render_queue = []
+        self._thumb_render_job = None
+        self._thumb_visible_job = None
         self._skip_pages = {}
         self._page_adjustments = {}
         self._adjustment_controls_page = None
@@ -868,6 +885,9 @@ class PdfCleanerApp(tk.Tk):
         self.split_pages_var = tk.BooleanVar(value=False)
         self.clean_limit_var = tk.BooleanVar(value=False)
         self.clean_count_var = tk.IntVar(value=1)
+        self.compress_pdf_var = tk.BooleanVar(value=False)
+        self.compression_level_var = tk.StringVar(value=COMPRESSION_LEVELS["medium"]["label"])
+        self.compression_scope_var = tk.StringVar(value=COMPRESSION_SCOPES["all"])
         self.edge_clean_var.trace_add("write", self._on_edge_zone_change)
         self.clean_limit_var.trace_add("write", self._on_clean_limit_change)
         self.clean_count_var.trace_add("write", self._on_clean_limit_change)
@@ -937,6 +957,44 @@ class PdfCleanerApp(tk.Tk):
             relief="flat",
             highlightthickness=1, highlightbackground=AMBER_BDR)
         self._color_info_lbl.pack(fill="x", pady=(5, 0))
+
+        sep(inner)
+        self._section(inner, "Сжатие")
+        compress_sec = tk.Frame(inner, bg=BG1)
+        compress_sec.pack(fill="x", padx=12, pady=(6, 12))
+
+        tk.Checkbutton(
+            compress_sec, variable=self.compress_pdf_var,
+            bg=BG1, activebackground=BG1,
+            fg=TXT1, activeforeground=TXT0,
+            selectcolor=BG0,
+            font=("Segoe UI", 9),
+            text="Сжимать PDF",
+            anchor="w").pack(fill="x")
+
+        tk.Label(
+            compress_sec, text="Уровень",
+            font=("Segoe UI", 8), fg=TXT2, bg=BG1,
+            anchor="w").pack(fill="x", pady=(6, 2))
+        ttk.Combobox(
+            compress_sec,
+            textvariable=self.compression_level_var,
+            values=[item["label"] for item in COMPRESSION_LEVELS.values()],
+            state="readonly",
+            font=("Segoe UI", 9),
+        ).pack(fill="x")
+
+        tk.Label(
+            compress_sec, text="Применять",
+            font=("Segoe UI", 8), fg=TXT2, bg=BG1,
+            anchor="w").pack(fill="x", pady=(6, 2))
+        ttk.Combobox(
+            compress_sec,
+            textvariable=self.compression_scope_var,
+            values=list(COMPRESSION_SCOPES.values()),
+            state="readonly",
+            font=("Segoe UI", 9),
+        ).pack(fill="x")
 
         sep(inner)
         self._section(inner, "Текущая страница")
@@ -1148,19 +1206,33 @@ class PdfCleanerApp(tk.Tk):
 
         # Внутренняя прокрутка
         sc = tk.Canvas(frame, bg=BG1, highlightthickness=0, height=self._ui.px(76))
-        hsb = tk.Scrollbar(frame, orient="horizontal", command=sc.xview)
-        sc.configure(xscrollcommand=hsb.set)
+        hsb = tk.Scrollbar(frame, orient="horizontal", command=self._thumb_xview)
+
+        def _xscroll(first, last):
+            hsb.set(first, last)
+            self._schedule_visible_thumb_render()
+
+        sc.configure(xscrollcommand=_xscroll)
         # Полоса прокрутки появляется только при необходимости
         self._thumb_canvas = sc
         self._thumb_inner  = tk.Frame(sc, bg=BG1)
         sc_win = sc.create_window((0, 0), window=self._thumb_inner, anchor="nw")
 
-        def _cfg(e): sc.configure(scrollregion=sc.bbox("all"))
+        def _cfg(e):
+            sc.configure(scrollregion=sc.bbox("all"))
+            self._schedule_visible_thumb_render()
+
         self._thumb_inner.bind("<Configure>", _cfg)
+        sc.bind("<Configure>", lambda _e: self._schedule_visible_thumb_render())
         hsb.pack(side="bottom", fill="x")
         sc.pack(fill="both", expand=True)
 
         self._thumb_frames = []   # список (frame, dot_label, rot_label, num_label)
+        self._thumb_containers = {}
+        self._thumb_rendered = set()
+        self._thumb_render_queue = []
+        self._thumb_render_job = None
+        self._thumb_visible_job = None
 
     def _build_page_nav(self, parent):
         nav = tk.Frame(parent, bg=BG1, height=self._ui.px(36))
@@ -1332,27 +1404,58 @@ class PdfCleanerApp(tk.Tk):
 
         return self._unique_output_path(out_path, self.split_pages_var.get())
 
+    def _compression_options(self):
+        return _compression_options_from_labels(
+            bool(getattr(self, "compress_pdf_var", tk.BooleanVar(value=False)).get()),
+            getattr(self, "compression_level_var", tk.StringVar(value=COMPRESSION_LEVELS["medium"]["label"])).get(),
+            getattr(self, "compression_scope_var", tk.StringVar(value=COMPRESSION_SCOPES["all"])).get(),
+        )
+
     def _export_session(self):
         if not self._ensure_document_ready("экспорта"):
             return
         self._store_current_page_adjustment()
         out_path = self._resolved_output_path()
         self.output_var.set(str(out_path))
+        compression = self._compression_options()
 
         try:
             images = []
+            compression_flags = []
             for idx in range(self._page_count):
                 image = self._render_session_page_image(idx, 300)
                 if image.mode != "RGB":
                     image = image.convert("RGB")
                 images.append(image)
+                is_color = bool(self._color_pages.get(idx, False))
+                if (
+                    compression
+                    and compression.get("enabled")
+                    and compression.get("scope") == "color"
+                    and idx not in self._color_pages
+                ):
+                    is_color = _pil_image_has_color(image)
+                    self._color_pages[idx] = is_color
+                compression_flags.append(_compression_applies(
+                    compression,
+                    is_color=is_color,
+                    is_processed=not self._skip_pages.get(idx, False)
+                    and not self._is_page_outside_clean_limit(idx),
+                ))
                 pct = (idx + 1) / max(1, self._page_count) * 100
                 self._prog_var.set(pct)
                 self._prog_pct_var.set(f"{int(round(pct))}%")
                 self._sb_status_var.set(f"Экспорт: стр. {idx + 1}/{self._page_count}")
                 self.update_idletasks()
 
-            saved_path = _save_pdf_images(images, out_path, 300, self.split_pages_var.get())
+            saved_path = _save_pdf_images(
+                images,
+                out_path,
+                300,
+                self.split_pages_var.get(),
+                compression=compression,
+                page_compression_flags=compression_flags,
+            )
             self._prog_var.set(100)
             self._prog_pct_var.set("100%")
             self._sb_status_var.set(f"Экспорт готов: {Path(saved_path).name}")
@@ -1500,7 +1603,7 @@ class PdfCleanerApp(tk.Tk):
             self._recount_edits()
 
         self._update_status_bar()
-        threading.Thread(target=self._detect_color_pages, daemon=True).start()
+        self._schedule_color_detection(delay=900, pdf_bytes=pdf_bytes)
         return True
 
     def _replace_current_page_with_image(self, image, dpi=300):
@@ -1647,7 +1750,17 @@ class PdfCleanerApp(tk.Tk):
             self.clean_count_var.set(max(1, self._page_count))
         self._sync_clean_count_controls()
         self._update_status_bar()
-        threading.Thread(target=self._detect_color_pages, daemon=True).start()
+        if self._page_count <= 200:
+            try:
+                pdf_bytes = self._doc.tobytes(garbage=4, deflate=True)
+            except TypeError:
+                pdf_bytes = self._doc.tobytes()
+            except Exception:
+                pdf_bytes = None
+            if pdf_bytes:
+                self._schedule_color_detection(delay=900, pdf_bytes=pdf_bytes)
+        else:
+            self._color_detect_generation += 1
 
     def _add_pages_after_current(self):
         if not self._ensure_document_ready("добавления страниц"):
@@ -1995,7 +2108,15 @@ class PdfCleanerApp(tk.Tk):
             messagebox.showerror("Ошибка открытия", str(e))
             return
 
+        old_doc = self._doc
+        self._cancel_thumb_render_job()
+        self._color_detect_generation += 1
         self._doc = doc
+        if old_doc is not None:
+            try:
+                old_doc.close()
+            except Exception:
+                pass
         self._input_path = path
         self._page_count = len(doc)
         self._current_page = 0
@@ -2022,44 +2143,84 @@ class PdfCleanerApp(tk.Tk):
         self._title_label.config(text=f"✦  CrystalPDF  ·  {fname}")
         self._file_chip.config(text=fname, fg=TXT1)
 
-        # Определяем цветные страницы в фоне
-        threading.Thread(target=self._detect_color_pages, daemon=True).start()
-
         self._build_thumb_widgets()
         self._go_page(0)
         self._update_status_bar()
+        self._schedule_color_detection(path, delay=900)
 
-    def _detect_color_pages(self):
+    def _schedule_color_detection(self, source_path=None, delay=500, pdf_bytes=None):
+        if self._color_detect_job is not None:
+            try:
+                self.after_cancel(self._color_detect_job)
+            except Exception:
+                pass
+            self._color_detect_job = None
+
+        self._color_detect_generation += 1
+        generation = self._color_detect_generation
+
+        def start_detection():
+            self._color_detect_job = None
+            threading.Thread(
+                target=self._detect_color_pages,
+                args=(source_path, generation, pdf_bytes),
+                daemon=True,
+            ).start()
+
+        self._color_detect_job = self.after(max(0, int(delay)), start_detection)
+
+    def _detect_color_pages(self, source_path=None, generation=None, pdf_bytes=None):
         """Фоново определяет, какие страницы содержат цвет."""
         try:
             import fitz
             import numpy as np
 
-            for i in range(self._page_count):
-                if self._doc is None:
-                    return
-                page = self._doc.load_page(i)
-                pix  = page.get_pixmap(matrix=fitz.Matrix(0.3, 0.3))
-                import numpy as np
-                arr  = np.frombuffer(pix.samples, dtype=np.uint8
-                                     ).reshape(pix.h, pix.w, pix.n)
-                if pix.n >= 3:
-                    r, g, b = arr[:,:,0].astype(int), arr[:,:,1].astype(int), arr[:,:,2].astype(int)
-                    chroma = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) // 3
-                    self._color_pages[i] = bool(np.mean(chroma > 15) > 0.005)
-                else:
-                    self._color_pages[i] = False
+            if generation != self._color_detect_generation:
+                return
 
-            self._queue.put(("color_detect_done",))
+            if pdf_bytes is not None:
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            elif source_path:
+                doc = fitz.open(source_path)
+            else:
+                return
+
+            detected = {}
+            try:
+                total = len(doc)
+                color_zoom = 0.16 if total > 300 else 0.22
+                for i in range(total):
+                    if generation != self._color_detect_generation:
+                        return
+                    page = doc.load_page(i)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(color_zoom, color_zoom), colorspace=fitz.csRGB)
+                    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+                    if pix.n >= 3:
+                        r = arr[:, :, 0].astype(int)
+                        g = arr[:, :, 1].astype(int)
+                        b = arr[:, :, 2].astype(int)
+                        chroma = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) // 3
+                        detected[i] = bool(np.mean(chroma > 15) > 0.005)
+                    else:
+                        detected[i] = False
+                    if (i + 1) % 25 == 0:
+                        self._queue.put(("color_detect_partial", generation, dict(detected)))
+            finally:
+                doc.close()
+
+            self._queue.put(("color_detect_done", generation, detected))
         except Exception:
             pass
 
     # ── ВИДЖЕТЫ МИНИАТЮР ──────────────────────────────────────────────────────
     def _build_thumb_widgets(self):
-        # Чистим старые
+        self._cancel_thumb_render_job()
         for w in self._thumb_inner.winfo_children():
             w.destroy()
         self._thumb_frames = []
+        self._thumb_containers = {}
+        self._thumb_rendered = set()
+        self._thumb_render_queue = []
 
         for i in range(self._page_count):
             f = tk.Frame(self._thumb_inner, bg=BG1, cursor="hand2",
@@ -2096,11 +2257,107 @@ class PdfCleanerApp(tk.Tk):
 
             # Рендерим миниатюру реального содержимого
             self._thumb_frames.append((f, dot, rot_lbl))
-            self._render_thumb(i, thumb_bg)
+            self._thumb_containers[i] = thumb_bg
             self._update_thumb_status(i)
 
-        # Прокрутка к первой
+        for idx in range(min(self._page_count, 18)):
+            self._queue_thumb_render(idx)
+        self._queue_thumb_render(self._current_page, priority=True)
+        self._schedule_visible_thumb_render(delay=120)
+
         self._thumb_canvas.after(50, lambda: self._thumb_canvas.xview_moveto(0))
+
+    def _cancel_thumb_render_job(self):
+        if self._thumb_render_job is not None:
+            try:
+                self.after_cancel(self._thumb_render_job)
+            except Exception:
+                pass
+            self._thumb_render_job = None
+        if self._thumb_visible_job is not None:
+            try:
+                self.after_cancel(self._thumb_visible_job)
+            except Exception:
+                pass
+            self._thumb_visible_job = None
+
+    def _thumb_xview(self, *args):
+        if not hasattr(self, "_thumb_canvas"):
+            return
+        self._thumb_canvas.xview(*args)
+        self._schedule_visible_thumb_render(delay=30)
+
+    def _schedule_visible_thumb_render(self, delay=80):
+        if self._doc is None or not getattr(self, "_thumb_frames", None):
+            return
+        if self._thumb_visible_job is not None:
+            return
+        self._thumb_visible_job = self.after(
+            max(0, int(delay)),
+            self._queue_visible_thumb_render,
+        )
+
+    def _queue_visible_thumb_render(self):
+        self._thumb_visible_job = None
+        if self._doc is None or not getattr(self, "_thumb_frames", None):
+            return
+
+        for idx in range(max(0, self._current_page - 3), min(self._page_count, self._current_page + 4)):
+            self._queue_thumb_render(idx, priority=True)
+
+        try:
+            bbox = self._thumb_canvas.bbox("all")
+            if not bbox:
+                return
+            total_width = max(1, bbox[2] - bbox[0])
+            left_frac, right_frac = self._thumb_canvas.xview()
+            left = left_frac * total_width
+            right = right_frac * total_width
+            preload = max(self._ui.px(260), self._thumb_canvas.winfo_width() // 2)
+            left -= preload
+            right += preload
+
+            for idx, (frame, _dot, _rot_lbl) in enumerate(self._thumb_frames):
+                x0 = frame.winfo_x()
+                x1 = x0 + max(1, frame.winfo_width())
+                if x1 >= left and x0 <= right:
+                    self._queue_thumb_render(idx)
+        except Exception:
+            pass
+
+    def _queue_thumb_render(self, idx, priority=False):
+        if idx < 0 or idx >= self._page_count:
+            return
+        if idx in self._thumb_rendered:
+            return
+        if idx in self._thumb_render_queue:
+            if priority:
+                self._thumb_render_queue.remove(idx)
+                self._thumb_render_queue.insert(0, idx)
+            return
+        if priority:
+            self._thumb_render_queue.insert(0, idx)
+        else:
+            self._thumb_render_queue.append(idx)
+        self._schedule_thumb_render()
+
+    def _schedule_thumb_render(self):
+        if self._thumb_render_job is None and self._thumb_render_queue:
+            self._thumb_render_job = self.after(20, self._render_next_thumb_batch)
+
+    def _render_next_thumb_batch(self):
+        self._thumb_render_job = None
+        rendered = 0
+        while self._thumb_render_queue and rendered < 2:
+            idx = self._thumb_render_queue.pop(0)
+            container = self._thumb_containers.get(idx)
+            if container is None or idx in self._thumb_rendered:
+                continue
+            self._render_thumb(idx, container)
+            self._thumb_rendered.add(idx)
+            rendered += 1
+        if self._thumb_render_queue:
+            self._schedule_thumb_render()
 
     def _render_thumb(self, idx, container):
         """Рендерит реальную миниатюру страницы в контейнер."""
@@ -2186,6 +2443,7 @@ class PdfCleanerApp(tk.Tk):
         self._pan_anchor = None
         self._sync_adjustment_controls(idx)
         self._update_page_flags_ui()
+        self._queue_thumb_render(idx, priority=True)
 
         # Обновить подсветку старой миниатюры
         self._update_thumb_status(old)
@@ -2200,6 +2458,7 @@ class PdfCleanerApp(tk.Tk):
                 if total > 0:
                     frac = x1 / total
                     self._thumb_canvas.xview_moveto(max(0, frac - 0.1))
+                    self._schedule_visible_thumb_render(delay=30)
         except Exception:
             pass
 
@@ -2939,6 +3198,8 @@ class PdfCleanerApp(tk.Tk):
         self._rotations[idx] = new_rot
         self._push_action({"type": "rotate", "page": idx, "before": cur, "after": new_rot})
         self._update_thumb_status(idx)
+        self._thumb_rendered.discard(idx)
+        self._queue_thumb_render(idx, priority=True)
 
         # Перерендеривать миниатюру
         if idx < len(self._thumb_frames):
@@ -3430,15 +3691,6 @@ class PdfCleanerApp(tk.Tk):
                             limit_skip or
                             (is_first and p["skip_first"]) or
                             (is_last  and p["skip_last"]))
-                is_detected_color = bool(p["color_pages"].get(page_num, False))
-                is_color = bool(p["keep_color"] and is_detected_color)
-                edge_cleanup = _edge_cleanup_allowed(
-                    page_num,
-                    total,
-                    bool(p["edge_clean"]),
-                    p["color_pages"],
-                )
-
                 rot = p["rotations"].get(page_num, 0)
                 brightness, contrast = _adjustment_values_from_map(
                     p["page_adjustments"],
@@ -3459,6 +3711,20 @@ class PdfCleanerApp(tk.Tk):
                                      ).reshape(pix.h, pix.w, 3)
                 original_rgb = Image.fromarray(img)
                 protected_box = p["protected_boxes"].get(page_num)
+                if page_num in p["color_pages"]:
+                    is_detected_color = bool(p["color_pages"].get(page_num, False))
+                elif p["keep_color"]:
+                    is_detected_color = _rgb_array_has_color(img)
+                    p["color_pages"][page_num] = is_detected_color
+                else:
+                    is_detected_color = False
+                is_color = bool(p["keep_color"] and is_detected_color)
+                edge_cleanup = _edge_cleanup_allowed(
+                    page_num,
+                    total,
+                    bool(p["edge_clean"]),
+                    p["color_pages"],
+                )
 
                 pct = (page_num + 1) / total * 100
                 lbl = f"Стр. {page_num + 1}/{total}"
@@ -3570,11 +3836,21 @@ class PdfCleanerApp(tk.Tk):
                     _, text, color = msg
                     self._sb_status_var.set(text)
 
-                elif kind == "color_detect_done":
-                    # Перерисовываем миниатюры с отметками цвета
-                    self._build_thumb_widgets()
-                    self._render_page()
-                    self._update_status_bar()
+                elif kind in ("color_detect_partial", "color_detect_done"):
+                    _, generation, color_pages = msg
+                    if generation == self._color_detect_generation:
+                        changed_current = False
+                        for idx, value in color_pages.items():
+                            idx = int(idx)
+                            if 0 <= idx < self._page_count:
+                                prev = self._color_pages.get(idx)
+                                self._color_pages[idx] = bool(value)
+                                changed_current = changed_current or (
+                                    idx == self._current_page and prev != bool(value)
+                                )
+                        if kind == "color_detect_done" or changed_current:
+                            self._render_page()
+                        self._update_status_bar()
 
                 elif kind == "session_done":
                     _, pdf_bytes, page_statuses = msg
@@ -3786,7 +4062,113 @@ def _adjustment_values_from_map(adjustments, idx):
     )
 
 
-def _save_pdf_images(images, output_path, dpi, split_pages=False):
+def _compression_options_from_labels(enabled, level_label, scope_label):
+    level_key = "medium"
+    for key, item in COMPRESSION_LEVELS.items():
+        if item["label"] == level_label:
+            level_key = key
+            break
+
+    scope_key = "all"
+    for key, label in COMPRESSION_SCOPES.items():
+        if label == scope_label:
+            scope_key = key
+            break
+
+    level = COMPRESSION_LEVELS[level_key]
+    return {
+        "enabled": bool(enabled),
+        "level": level_key,
+        "scope": scope_key,
+        "dpi": int(level["dpi"]),
+        "quality": int(level["quality"]),
+    }
+
+
+def _compression_applies(compression, is_color=False, is_processed=False):
+    if not compression or not compression.get("enabled"):
+        return False
+    scope = compression.get("scope", "all")
+    if scope == "color":
+        return bool(is_color)
+    if scope == "processed":
+        return bool(is_processed)
+    return True
+
+
+def _prepare_pdf_image(image, dpi, compression=None, compress_page=False):
+    from PIL import Image
+
+    page_dpi = max(1.0, float(dpi))
+    quality = 95
+    img = image.convert("RGB")
+
+    if compress_page and compression and compression.get("enabled"):
+        target_dpi = max(72.0, min(page_dpi, float(compression.get("dpi", page_dpi))))
+        if target_dpi < page_dpi - 0.5:
+            scale = target_dpi / page_dpi
+            new_size = (
+                max(1, int(round(img.width * scale))),
+                max(1, int(round(img.height * scale))),
+            )
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+            page_dpi = target_dpi
+        quality = max(35, min(95, int(compression.get("quality", quality))))
+
+    page_w = max(1.0, img.width / page_dpi * 72.0)
+    page_h = max(1.0, img.height / page_dpi * 72.0)
+    return img, page_w, page_h, quality
+
+
+def _image_to_pdf_stream(image, quality, compressed=False):
+    import io
+
+    buffer = io.BytesIO()
+    kwargs = {"format": "JPEG", "quality": int(quality)}
+    if compressed:
+        kwargs["optimize"] = True
+        kwargs["progressive"] = True
+    image.save(buffer, **kwargs)
+    return buffer.getvalue()
+
+
+def _write_pdf_images(images, output_path, dpi, compression=None, page_compression_flags=None):
+    import fitz
+
+    if not images:
+        raise ValueError("No pages to save")
+
+    target = fitz.open()
+    try:
+        for idx, image in enumerate(images):
+            compress_page = bool(
+                page_compression_flags[idx]
+                if page_compression_flags is not None and idx < len(page_compression_flags)
+                else False
+            )
+            prepared, page_w, page_h, quality = _prepare_pdf_image(
+                image,
+                dpi,
+                compression,
+                compress_page,
+            )
+            stream = _image_to_pdf_stream(prepared, quality, compressed=compress_page)
+            page = target.new_page(width=page_w, height=page_h)
+            page.insert_image(page.rect, stream=stream)
+
+        target.save(str(output_path), garbage=4, deflate=True, clean=True)
+    finally:
+        target.close()
+
+
+def _save_pdf_images(
+    images,
+    output_path,
+    dpi,
+    split_pages=False,
+    compression=None,
+    page_compression_flags=None,
+):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3797,18 +4179,38 @@ def _save_pdf_images(images, output_path, dpi, split_pages=False):
         for index, image in enumerate(images, start=1):
             page_path = folder / f"{output_path.stem}_{index:03d}.pdf"
             temp_path = page_path.with_name(f"{page_path.stem}.tmp-{uuid4().hex}.pdf")
-            image.save(temp_path, resolution=float(dpi), quality=95)
-            temp_path.replace(page_path)
+            try:
+                flag = bool(
+                    page_compression_flags[index - 1]
+                    if page_compression_flags is not None and index - 1 < len(page_compression_flags)
+                    else False
+                )
+                _write_pdf_images(
+                    [image],
+                    temp_path,
+                    dpi,
+                    compression,
+                    [flag],
+                )
+                temp_path.replace(page_path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
         return folder
 
     temp_output = output_path.with_name(f"{output_path.stem}.tmp-{uuid4().hex}.pdf")
-    images[0].save(
-        temp_output,
-        save_all=True,
-        append_images=images[1:],
-        resolution=float(dpi),
-        quality=95)
-    temp_output.replace(output_path)
+    try:
+        _write_pdf_images(
+            images,
+            temp_output,
+            dpi,
+            compression,
+            page_compression_flags,
+        )
+        temp_output.replace(output_path)
+    finally:
+        if temp_output.exists():
+            temp_output.unlink()
     return output_path
 
 
@@ -3835,17 +4237,30 @@ def _pdf_images_to_bytes(images, dpi):
     return buffer.getvalue()
 
 
-def _pil_image_has_color(image):
+def _rgb_array_has_color(arr, max_pixels=250000):
     import numpy as np
 
-    arr = np.asarray(image.convert("RGB"), dtype=np.int16)
+    arr = np.asarray(arr)
     if arr.size == 0:
         return False
+    if arr.ndim < 3 or arr.shape[2] < 3:
+        return False
+    pixels = int(arr.shape[0]) * int(arr.shape[1])
+    if pixels > max_pixels:
+        step = max(1, int(np.ceil(np.sqrt(pixels / float(max_pixels)))))
+        arr = arr[::step, ::step, :]
+    arr = arr[:, :, :3].astype(np.int16, copy=False)
     r = arr[:, :, 0]
     g = arr[:, :, 1]
     b = arr[:, :, 2]
     chroma = (np.abs(r - g) + np.abs(g - b) + np.abs(r - b)) // 3
     return bool(np.mean(chroma > 15) > 0.005)
+
+
+def _pil_image_has_color(image):
+    import numpy as np
+
+    return _rgb_array_has_color(np.asarray(image.convert("RGB")))
 
 
 def _deskew_pil_image(pil_img, max_angle_deg):
@@ -3859,27 +4274,8 @@ def _deskew_pil_image(pil_img, max_angle_deg):
     if h <= 0 or w <= 0:
         return source, 0.0
 
-    crop_x = max(1, int(w * 0.04))
-    crop_y = max(1, int(h * 0.04))
-    work = gray[crop_y : h - crop_y, crop_x : w - crop_x]
-    if work.size == 0:
-        work = gray
-
-    _, thresh = cv2.threshold(work, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel_width = max(25, int(w / 55))
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1))
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
-    coords = np.column_stack(np.where(dilated > 0))
-    if len(coords) < 80:
-        return source, 0.0
-
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-
-    if abs(angle) > float(max_angle_deg) or abs(angle) < 0.25:
+    angle = estimate_deskew_angle(gray, max_angle_deg, min_abs_angle=0.65)
+    if abs(angle) < 0.001:
         return source, 0.0
 
     arr = np.asarray(source)
@@ -3902,22 +4298,9 @@ def _deskew(gray, max_angle_deg):
     Возвращает выровненный grayscale.
     """
     import cv2
-    import numpy as np
 
-    _, thresh = cv2.threshold(gray, 0, 255,
-                              cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
-
-    coords = np.column_stack(np.where(dilated > 0))
-    if len(coords) < 50:
-        return gray
-
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = 90 + angle
-
-    if abs(angle) > max_angle_deg or abs(angle) < 0.3:
+    angle = estimate_deskew_angle(gray, max_angle_deg)
+    if abs(angle) < 0.001:
         return gray
 
     h, w = gray.shape
