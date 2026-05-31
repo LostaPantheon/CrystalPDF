@@ -285,6 +285,8 @@ class PdfCleanerApp(tk.Tk):
         # --- Состояние ---
         self._queue       = queue.Queue()
         self._processing  = False
+        self._importing   = False
+        self._import_generation = 0
         self._cancel_requested = threading.Event()
         self._processing_before_state = None
         self._doc         = None          # fitz.Document
@@ -324,6 +326,10 @@ class PdfCleanerApp(tk.Tk):
         self._thumb_render_queue = []
         self._thumb_render_job = None
         self._thumb_visible_job = None
+        self._thumb_build_job = None
+        self._thumb_build_generation = 0
+        self._thumb_build_next = 0
+        self._thumb_build_done_callback = None
         self._skip_pages = {}
         self._page_adjustments = {}
         self._adjustment_controls_page = None
@@ -735,11 +741,11 @@ class PdfCleanerApp(tk.Tk):
         file_sec = tk.Frame(inner, bg=BG1)
         file_sec.pack(fill="x", padx=12, pady=(6, 12))
 
-        btn_imp = styled_btn(file_sec, "⬆  Импорт PDF",
-                             self._browse_input, fg=BLUE, bg=BLUE_BG,
-                             padx=12, pady=8, font_size=10)
-        btn_imp.pack(fill="x", pady=(0, 5))
-        btn_imp.config(highlightbackground=BLUE_BDR)
+        self._import_btn = styled_btn(file_sec, "⬆  Импорт PDF",
+                                      self._browse_input, fg=BLUE, bg=BLUE_BG,
+                                      padx=12, pady=8, font_size=10)
+        self._import_btn.pack(fill="x", pady=(0, 5))
+        self._import_btn.config(highlightbackground=BLUE_BDR)
 
         self._export_btn = styled_btn(
             file_sec, "⬇  Экспорт PDF",
@@ -1357,6 +1363,13 @@ class PdfCleanerApp(tk.Tk):
         return output_path.with_name(f"{output_path.stem}_{uuid4().hex[:8]}{output_path.suffix}")
 
     def _browse_input(self):
+        if self._importing:
+            return
+        if self._processing:
+            messagebox.showwarning(
+                "Подождите",
+                "Сначала дождитесь окончания обработки PDF.")
+            return
         path = filedialog.askopenfilename(
             title="Выберите входной PDF",
             filetypes=[("PDF", "*.pdf"), ("Все файлы", "*.*")])
@@ -1464,6 +1477,11 @@ class PdfCleanerApp(tk.Tk):
             messagebox.showerror("Ошибка экспорта", str(e))
 
     def _ensure_document_ready(self, action_text="операции"):
+        if self._importing:
+            messagebox.showwarning(
+                "Подождите",
+                "Сначала дождитесь окончания импортирования PDF.")
+            return False
         if self._processing:
             messagebox.showwarning(
                 "Подождите",
@@ -2096,20 +2114,114 @@ class PdfCleanerApp(tk.Tk):
 
     # ── ЗАГРУЗКА PDF ──────────────────────────────────────────────────────────
     def _load_pdf(self, path):
-        try:
-            import fitz
-        except ImportError:
-            messagebox.showerror("Ошибка", "Установите pymupdf:\n\npip install pymupdf")
+        if self._processing:
+            messagebox.showwarning(
+                "Подождите",
+                "Сначала дождитесь окончания обработки PDF.")
+            return
+        if self._importing:
             return
 
+        self._import_generation += 1
+        generation = self._import_generation
+        self._set_importing_ui(True, path)
+        threading.Thread(
+            target=self._run_import,
+            args=(path, generation),
+            daemon=True,
+        ).start()
+
+    def _set_importing_ui(self, importing, path=None):
+        self._importing = bool(importing)
+        if importing:
+            self._cancel_thumb_render_job()
+            self._cancel_thumb_build_job()
+            if self._color_detect_job is not None:
+                try:
+                    self.after_cancel(self._color_detect_job)
+                except Exception:
+                    pass
+                self._color_detect_job = None
+            self._color_detect_generation += 1
+            self._prog_var.set(0)
+            self._prog_pct_var.set("0%")
+            self._sb_status_var.set("Импортирование: открытие PDF")
+            if hasattr(self, "_badge_label"):
+                self._badge_label.config(text="импортирование", fg=BLUE)
+            if hasattr(self, "_st_main"):
+                self._st_main.config(text="импортирование", fg=BLUE)
+            if hasattr(self, "_st_right"):
+                self._st_right.config(text="импортирование PDF")
+            if hasattr(self, "_import_btn"):
+                self._import_btn.config(state="disabled", fg=TXT2, bg=BG2)
+            if hasattr(self, "_export_btn"):
+                self._export_btn.config(state="disabled", fg=TXT2, bg=BG2)
+            if hasattr(self, "_run_btn"):
+                self._run_btn.config(state="disabled", fg=TXT2, bg=BG3)
+            if hasattr(self, "_cancel_btn"):
+                self._cancel_btn.config(state="disabled", fg=TXT2, bg=BG2)
+            if path and hasattr(self, "_file_chip"):
+                self._file_chip.config(text=f"импортирование: {os.path.basename(path)}", fg=BLUE)
+            self.config(cursor="watch")
+            if hasattr(self, "_canvas"):
+                self._canvas.config(cursor="watch")
+                self._draw_import_placeholder()
+        else:
+            self.config(cursor="")
+            if hasattr(self, "_import_btn"):
+                self._import_btn.config(state="normal", fg=BLUE, bg=BLUE_BG,
+                                        highlightbackground=BLUE_BDR)
+            if not self._processing:
+                self._set_processing_buttons(False)
+            if hasattr(self, "_canvas"):
+                self._set_tool(self._tool)
+
+    def _draw_import_placeholder(self):
+        if not hasattr(self, "_canvas"):
+            return
+        self._canvas.delete("all")
+        w = self._canvas.winfo_width() or 600
+        h = self._canvas.winfo_height() or 400
+        self._canvas.create_text(
+            w // 2,
+            h // 2,
+            text="Импортирование PDF...",
+            fill=BLUE,
+            font=("Segoe UI", 12, "bold"),
+        )
+
+    def _run_import(self, path, generation):
+        doc = None
         try:
+            import fitz
+            self._queue.put(("import_progress", generation, 5, "Импортирование: открытие PDF"))
             doc = fitz.open(path)
+            page_count = len(doc)
+            if page_count <= 0:
+                raise ValueError("В PDF нет страниц")
+            self._queue.put(("import_progress", generation, 20, f"Импортирование: найдено страниц {page_count}"))
+            self._queue.put(("import_opened", generation, path, doc, page_count))
+        except ImportError:
+            self._queue.put(("import_error", generation, "Установите pymupdf:\n\npip install pymupdf"))
         except Exception as e:
-            messagebox.showerror("Ошибка открытия", str(e))
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+            self._queue.put(("import_error", generation, str(e)))
+
+    def _apply_imported_doc(self, generation, path, doc, page_count):
+        if generation != self._import_generation or not self._importing:
+            try:
+                doc.close()
+            except Exception:
+                pass
             return
 
         old_doc = self._doc
         self._cancel_thumb_render_job()
+        self._cancel_thumb_build_job()
         self._color_detect_generation += 1
         self._doc = doc
         if old_doc is not None:
@@ -2118,7 +2230,7 @@ class PdfCleanerApp(tk.Tk):
             except Exception:
                 pass
         self._input_path = path
-        self._page_count = len(doc)
+        self._page_count = int(page_count)
         self._current_page = 0
         self._pan_x = 0
         self._pan_y = 0
@@ -2143,10 +2255,37 @@ class PdfCleanerApp(tk.Tk):
         self._title_label.config(text=f"✦  CrystalPDF  ·  {fname}")
         self._file_chip.config(text=fname, fg=TXT1)
 
-        self._build_thumb_widgets()
+        self._build_thumb_widgets_async(
+            generation,
+            done_callback=lambda: self._finish_import_success(generation, path),
+        )
+
+    def _finish_import_success(self, generation, path):
+        if generation != self._import_generation:
+            return
+        self._set_importing_ui(False)
         self._go_page(0)
+        self._prog_var.set(100)
+        self._prog_pct_var.set("100%")
+        self._sb_status_var.set(
+            f"Импортировано: {os.path.basename(path)} · {self._page_count} стр.")
         self._update_status_bar()
         self._schedule_color_detection(path, delay=900)
+
+    def _finish_import_error(self, generation, error_text):
+        if generation != self._import_generation:
+            return
+        self._set_importing_ui(False)
+        self._prog_var.set(0)
+        self._prog_pct_var.set("0%")
+        self._sb_status_var.set("Ошибка импортирования")
+        if hasattr(self, "_file_chip"):
+            if self._input_path:
+                self._file_chip.config(text=os.path.basename(self._input_path), fg=TXT1)
+            else:
+                self._file_chip.config(text="нет файла", fg=TXT3)
+        self._update_status_bar()
+        messagebox.showerror("Ошибка открытия", error_text)
 
     def _schedule_color_detection(self, source_path=None, delay=500, pdf_bytes=None):
         if self._color_detect_job is not None:
@@ -2213,8 +2352,42 @@ class PdfCleanerApp(tk.Tk):
             pass
 
     # ── ВИДЖЕТЫ МИНИАТЮР ──────────────────────────────────────────────────────
+    def _create_thumb_widget(self, i):
+        f = tk.Frame(self._thumb_inner, bg=BG1, cursor="hand2",
+                     highlightthickness=2,
+                     highlightbackground=BDR if i != 0 else BLUE)
+        f.pack(side="left", padx=(4 if i == 0 else 2, 2), pady=4)
+        f.bind("<Button-1>", lambda e, idx=i: self._go_page(idx))
+
+        thumb_bg = tk.Frame(f, bg=WHITE_PAGE,
+                            width=self._ui.px(44), height=self._ui.px(58))
+        thumb_bg.pack(padx=2, pady=(2, 0))
+        thumb_bg.pack_propagate(False)
+        for h in [8, 5, 5, 5, 5, 5, 5]:
+            tk.Frame(thumb_bg, bg="#dddddd", height=self._ui.px(h)
+                     ).pack(fill="x", padx=self._ui.px(5), pady=1)
+
+        dot = tk.Frame(f, bg=TXT3,
+                       width=self._ui.px(8), height=self._ui.px(8))
+        dot.place(in_=thumb_bg, relx=1.0, rely=0, anchor="ne",
+                  x=-2, y=2)
+
+        num = tk.Label(f, text=str(i + 1),
+                       font=("Courier New", 8), fg=TXT3, bg=BG1)
+        num.pack()
+
+        rot_lbl = tk.Label(f, text="",
+                           font=("Courier New", 7, "bold"),
+                           fg=AMBER, bg=BG1)
+        rot_lbl.pack()
+
+        self._thumb_frames.append((f, dot, rot_lbl))
+        self._thumb_containers[i] = thumb_bg
+        self._update_thumb_status(i)
+
     def _build_thumb_widgets(self):
         self._cancel_thumb_render_job()
+        self._cancel_thumb_build_job()
         for w in self._thumb_inner.winfo_children():
             w.destroy()
         self._thumb_frames = []
@@ -2223,48 +2396,67 @@ class PdfCleanerApp(tk.Tk):
         self._thumb_render_queue = []
 
         for i in range(self._page_count):
-            f = tk.Frame(self._thumb_inner, bg=BG1, cursor="hand2",
-                         highlightthickness=2,
-                         highlightbackground=BDR if i != 0 else BLUE)
-            f.pack(side="left", padx=(4 if i == 0 else 2, 2), pady=4)
-            f.bind("<Button-1>", lambda e, idx=i: self._go_page(idx))
-
-            # Миниатюра-заглушка
-            thumb_bg = tk.Frame(f, bg=WHITE_PAGE,
-                                width=self._ui.px(44), height=self._ui.px(58))
-            thumb_bg.pack(padx=2, pady=(2, 0))
-            thumb_bg.pack_propagate(False)
-            for h in [8, 5, 5, 5, 5, 5, 5]:
-                tk.Frame(thumb_bg, bg="#dddddd", height=self._ui.px(h)
-                         ).pack(fill="x", padx=self._ui.px(5), pady=1)
-
-            # Статус-точка
-            dot = tk.Frame(f, bg=TXT3,
-                           width=self._ui.px(8), height=self._ui.px(8))
-            dot.place(in_=thumb_bg, relx=1.0, rely=0, anchor="ne",
-                      x=-2, y=2)
-
-            # Номер
-            num = tk.Label(f, text=str(i + 1),
-                           font=("Courier New", 8), fg=TXT3, bg=BG1)
-            num.pack()
-
-            # Метка поворота
-            rot_lbl = tk.Label(f, text="",
-                               font=("Courier New", 7, "bold"),
-                               fg=AMBER, bg=BG1)
-            rot_lbl.pack()
-
-            # Рендерим миниатюру реального содержимого
-            self._thumb_frames.append((f, dot, rot_lbl))
-            self._thumb_containers[i] = thumb_bg
-            self._update_thumb_status(i)
+            self._create_thumb_widget(i)
 
         for idx in range(min(self._page_count, 18)):
             self._queue_thumb_render(idx)
         self._queue_thumb_render(self._current_page, priority=True)
         self._schedule_visible_thumb_render(delay=120)
 
+        self._thumb_canvas.after(50, lambda: self._thumb_canvas.xview_moveto(0))
+
+    def _build_thumb_widgets_async(self, generation, done_callback=None):
+        self._cancel_thumb_render_job()
+        self._cancel_thumb_build_job()
+        for w in self._thumb_inner.winfo_children():
+            w.destroy()
+        self._thumb_frames = []
+        self._thumb_containers = {}
+        self._thumb_rendered = set()
+        self._thumb_render_queue = []
+        self._thumb_build_generation = generation
+        self._thumb_build_next = 0
+        self._thumb_build_done_callback = done_callback
+        self._thumb_build_job = self.after(1, self._build_thumb_widgets_batch)
+
+    def _build_thumb_widgets_batch(self):
+        self._thumb_build_job = None
+        generation = self._thumb_build_generation
+        if generation != self._import_generation or self._doc is None:
+            return
+
+        total = max(0, int(self._page_count or 0))
+        start = int(self._thumb_build_next)
+        if total <= 0:
+            callback = self._thumb_build_done_callback
+            self._thumb_build_done_callback = None
+            if callback:
+                callback()
+            return
+
+        batch_size = 120 if total > 1000 else 80 if total > 300 else 45
+        end = min(total, start + batch_size)
+        for i in range(start, end):
+            self._create_thumb_widget(i)
+        self._thumb_build_next = end
+
+        pct = 20.0 + (end / max(1, total)) * 70.0
+        self._prog_var.set(pct)
+        self._prog_pct_var.set(f"{int(round(pct))}%")
+        self._sb_status_var.set(f"Импортирование: страницы {end}/{total}")
+
+        if end < total:
+            self._thumb_build_job = self.after(1, self._build_thumb_widgets_batch)
+            return
+
+        callback = self._thumb_build_done_callback
+        self._thumb_build_done_callback = None
+        if callback:
+            callback()
+        for idx in range(min(self._page_count, 18)):
+            self._queue_thumb_render(idx)
+        self._queue_thumb_render(self._current_page, priority=True)
+        self._schedule_visible_thumb_render(delay=120)
         self._thumb_canvas.after(50, lambda: self._thumb_canvas.xview_moveto(0))
 
     def _cancel_thumb_render_job(self):
@@ -2281,6 +2473,16 @@ class PdfCleanerApp(tk.Tk):
                 pass
             self._thumb_visible_job = None
 
+    def _cancel_thumb_build_job(self):
+        if self._thumb_build_job is not None:
+            try:
+                self.after_cancel(self._thumb_build_job)
+            except Exception:
+                pass
+            self._thumb_build_job = None
+        self._thumb_build_done_callback = None
+        self._thumb_build_next = 0
+
     def _thumb_xview(self, *args):
         if not hasattr(self, "_thumb_canvas"):
             return
@@ -2288,6 +2490,8 @@ class PdfCleanerApp(tk.Tk):
         self._schedule_visible_thumb_render(delay=30)
 
     def _schedule_visible_thumb_render(self, delay=80):
+        if self._importing:
+            return
         if self._doc is None or not getattr(self, "_thumb_frames", None):
             return
         if self._thumb_visible_job is not None:
@@ -2299,6 +2503,8 @@ class PdfCleanerApp(tk.Tk):
 
     def _queue_visible_thumb_render(self):
         self._thumb_visible_job = None
+        if self._importing:
+            return
         if self._doc is None or not getattr(self, "_thumb_frames", None):
             return
 
@@ -2326,6 +2532,8 @@ class PdfCleanerApp(tk.Tk):
             pass
 
     def _queue_thumb_render(self, idx, priority=False):
+        if self._importing:
+            return
         if idx < 0 or idx >= self._page_count:
             return
         if idx in self._thumb_rendered:
@@ -2347,6 +2555,8 @@ class PdfCleanerApp(tk.Tk):
 
     def _render_next_thumb_batch(self):
         self._thumb_render_job = None
+        if self._importing:
+            return
         rendered = 0
         while self._thumb_render_queue and rendered < 2:
             idx = self._thumb_render_queue.pop(0)
@@ -2361,6 +2571,8 @@ class PdfCleanerApp(tk.Tk):
 
     def _render_thumb(self, idx, container):
         """Рендерит реальную миниатюру страницы в контейнер."""
+        if self._importing:
+            return
         try:
             import fitz
             from PIL import Image, ImageTk
@@ -2431,6 +2643,8 @@ class PdfCleanerApp(tk.Tk):
 
     # ── НАВИГАЦИЯ ПО СТРАНИЦАМ ────────────────────────────────────────────────
     def _go_page(self, idx):
+        if self._importing:
+            return
         if self._doc is None:
             return
         idx = max(0, min(self._page_count - 1, idx))
@@ -2483,6 +2697,9 @@ class PdfCleanerApp(tk.Tk):
 
     # ── ОТРИСОВКА СТРАНИЦЫ ────────────────────────────────────────────────────
     def _render_page(self):
+        if self._importing:
+            self._draw_import_placeholder()
+            return
         if self._doc is None:
             self._canvas.delete("all")
             w = self._canvas.winfo_width() or 600
@@ -2822,6 +3039,8 @@ class PdfCleanerApp(tk.Tk):
 
     # ── УПРАВЛЕНИЕ ИНСТРУМЕНТАМИ ──────────────────────────────────────────────
     def _set_tool(self, tool):
+        if self._importing:
+            return
         self._tool = tool
         if not str(tool).startswith("split_"):
             self._canvas.delete("split_preview")
@@ -2851,6 +3070,8 @@ class PdfCleanerApp(tk.Tk):
 
     # ── СОБЫТИЯ ХОЛСТА ────────────────────────────────────────────────────────
     def _canvas_motion(self, event):
+        if self._importing:
+            return
         if self._doc is None:
             return
         self._canvas.delete("eraser_cursor")
@@ -2878,6 +3099,8 @@ class PdfCleanerApp(tk.Tk):
         self._canvas.delete("protect_preview")
 
     def _canvas_click(self, event):
+        if self._importing:
+            return "break"
         if self._tool == "eraser":
             if self._canvas_to_norm(event.x, event.y) is None:
                 self._stroke_before = None
@@ -2908,6 +3131,8 @@ class PdfCleanerApp(tk.Tk):
                 self._canvas.delete("protect_preview")
 
     def _canvas_drag(self, event):
+        if self._importing:
+            return "break"
         if self._tool == "eraser":
             if self._canvas_to_norm(event.x, event.y) is None:
                 self._canvas.delete("eraser_cursor")
@@ -2945,6 +3170,8 @@ class PdfCleanerApp(tk.Tk):
                     outline=CYAN, width=2, dash=(6, 3), tags="protect_preview")
 
     def _canvas_release(self, event):
+        if self._importing:
+            return "break"
         if self._tool == "eraser" and self._stroke_before is not None:
             idx = self._current_page
             after = list(self._eraser_masks.get(idx, []))
@@ -3032,7 +3259,7 @@ class PdfCleanerApp(tk.Tk):
         self._draw_protected_box_overlay()
 
     def _toggle_skip_page(self):
-        if self._doc is None:
+        if self._importing or self._doc is None:
             return
         idx = self._current_page
         before = bool(self._skip_pages.get(idx, False))
@@ -3048,7 +3275,7 @@ class PdfCleanerApp(tk.Tk):
         self._update_status_bar()
 
     def _clear_protected_area(self):
-        if self._doc is None:
+        if self._importing or self._doc is None:
             return
         idx = self._current_page
         before = _sanitize_norm_boxes(self._protected_boxes.get(idx))
@@ -3138,6 +3365,8 @@ class PdfCleanerApp(tk.Tk):
             self._clean_limit_syncing = False
 
     def _on_clean_limit_change(self, *_):
+        if self._importing:
+            return
         if getattr(self, "_clean_limit_syncing", False):
             return
         self._sync_clean_count_controls()
@@ -3154,6 +3383,8 @@ class PdfCleanerApp(tk.Tk):
         self._update_status_bar()
 
     def _clear_page(self):
+        if self._importing or self._doc is None:
+            return
         idx = self._current_page
         before_masks = list(self._eraser_masks.get(idx, []))
         before_crop = self._crop_boxes.get(idx)
@@ -3190,7 +3421,7 @@ class PdfCleanerApp(tk.Tk):
 
     # ── ПОВОРОТ ───────────────────────────────────────────────────────────────
     def _rotate_page(self, deg):
-        if self._doc is None:
+        if self._importing or self._doc is None:
             return
         idx = self._current_page
         cur = self._rotations.get(idx, 0)
@@ -3233,6 +3464,8 @@ class PdfCleanerApp(tk.Tk):
 
     # ── МАСШТАБ ───────────────────────────────────────────────────────────────
     def _set_zoom(self, value):
+        if self._importing:
+            return
         raw = min(5.0, max(0.15, float(value)))
         steps = getattr(self, "_zoom_steps", [raw])
         self._zoom = min(steps, key=lambda step: abs(step - raw))
@@ -3258,6 +3491,8 @@ class PdfCleanerApp(tk.Tk):
         self._set_zoom(self._zoom_steps[index])
 
     def _canvas_wheel_zoom(self, event):
+        if self._importing:
+            return "break"
         if self._doc is None:
             return "break"
         if self._tool != "pan":
@@ -3279,6 +3514,8 @@ class PdfCleanerApp(tk.Tk):
         self._update_history_buttons()
 
     def _undo(self):
+        if self._importing:
+            return
         if not self._undo_stack:
             return
         action = self._undo_stack.pop()
@@ -3289,6 +3526,8 @@ class PdfCleanerApp(tk.Tk):
         self._update_history_buttons()
 
     def _redo(self):
+        if self._importing:
+            return
         if not self._redo_stack:
             return
         action = self._redo_stack.pop()
@@ -3496,6 +3735,10 @@ class PdfCleanerApp(tk.Tk):
 
     # ── СТРОКА СОСТОЯНИЯ ──────────────────────────────────────────────────────
     def _update_status_bar(self):
+        if self._importing:
+            self._st_main.config(text="импортирование", fg=BLUE)
+            self._badge_label.config(text="импортирование", fg=BLUE)
+            return
         if self._processing:
             self._st_main.config(text="⚙  Обработка страниц…", fg=BLUE)
             self._badge_label.config(text="◉ Обработка", fg=BLUE)
@@ -3558,6 +3801,8 @@ class PdfCleanerApp(tk.Tk):
             self._run_btn.config(
                 text="⏳  Обработка…",
                 state="disabled", bg=BG3, fg=TXT2)
+            if hasattr(self, "_import_btn"):
+                self._import_btn.config(state="disabled", fg=TXT2, bg=BG2)
             if hasattr(self, "_cancel_btn"):
                 self._cancel_btn.config(
                     state="normal", fg=RED, bg=RED_BG,
@@ -3575,6 +3820,9 @@ class PdfCleanerApp(tk.Tk):
                     highlightbackground=BDR)
             if hasattr(self, "_export_btn"):
                 self._export_btn.config(state="normal", fg=GREEN, bg=GREEN_BG)
+            if hasattr(self, "_import_btn") and not self._importing:
+                self._import_btn.config(state="normal", fg=BLUE, bg=BLUE_BG,
+                                        highlightbackground=BLUE_BDR)
 
     def _cancel_processing(self):
         if not self._processing:
@@ -3820,7 +4068,24 @@ class PdfCleanerApp(tk.Tk):
                 msg = self._queue.get_nowait()
                 kind = msg[0]
 
-                if kind == "progress":
+                if kind == "import_progress":
+                    _, generation, pct, text = msg
+                    if generation == self._import_generation and self._importing:
+                        self._prog_var.set(pct)
+                        self._prog_pct_var.set(f"{int(round(pct))}%")
+                        self._sb_status_var.set(text)
+                        self._badge_label.config(text="импортирование", fg=BLUE)
+                        self._st_main.config(text="импортирование", fg=BLUE)
+
+                elif kind == "import_opened":
+                    _, generation, path, doc, page_count = msg
+                    self._apply_imported_doc(generation, path, doc, page_count)
+
+                elif kind == "import_error":
+                    _, generation, error_text = msg
+                    self._finish_import_error(generation, error_text)
+
+                elif kind == "progress":
                     _, pct, text = msg
                     self._prog_var.set(pct)
                     pct_text = f"{int(round(pct))}%"
