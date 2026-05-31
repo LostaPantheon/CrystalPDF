@@ -18,6 +18,8 @@ import threading
 import os
 import queue
 import math
+import re
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -57,6 +59,10 @@ DEFAULT_BRIGHTNESS = 0
 DEFAULT_CONTRAST = 100
 DEFAULT_EDGE_MARGIN = 5
 MAX_PROTECTED_BOXES_PER_PAGE = 15
+LARGE_DOCUMENT_PAGE_LIMIT = 300
+AUTO_COLOR_DETECT_PAGE_LIMIT = 250
+ASYNC_PAGE_RENDER_PAGE_LIMIT = 250
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 COMPRESSION_LEVELS = {
     "light": {"label": "Лёгкое", "dpi": 240, "quality": 88},
     "medium": {"label": "Среднее", "dpi": 200, "quality": 78},
@@ -330,6 +336,16 @@ class PdfCleanerApp(tk.Tk):
         self._thumb_build_generation = 0
         self._thumb_build_next = 0
         self._thumb_build_done_callback = None
+        self._page_render_generation = 0
+        self._page_render_after_job = None
+        self._page_render_active = False
+        self._page_render_pending = None
+        self._render_source_path_usable = False
+        self._render_source_path = None
+        self._temporary_import_pdf = None
+        self._color_detecting = False
+        self._color_detect_scanned = 0
+        self._color_detect_total = 0
         self._skip_pages = {}
         self._page_adjustments = {}
         self._adjustment_controls_page = None
@@ -754,6 +770,14 @@ class PdfCleanerApp(tk.Tk):
             padx=12, pady=8, font_size=10)
         self._export_btn.pack(fill="x", pady=(0, 5))
         self._export_btn.config(highlightbackground=GREEN_BDR)
+
+        self._import_folder_btn = styled_btn(
+            file_sec, "Папка сканов -> PDF",
+            self._browse_image_folder,
+            fg=CYAN, bg=CYAN_BG,
+            padx=12, pady=7, font_size=9)
+        self._import_folder_btn.pack(fill="x", pady=(0, 5))
+        self._import_folder_btn.config(highlightbackground=CYAN_BDR)
 
         # Чип выбранного файла
         self._file_chip = tk.Label(
@@ -1378,6 +1402,26 @@ class PdfCleanerApp(tk.Tk):
         self.output_var.set(str(self._default_output_path(path)))
         self._load_pdf(path)
 
+    def _browse_image_folder(self):
+        if self._importing:
+            return
+        if self._processing:
+            messagebox.showwarning(
+                "Подождите",
+                "Сначала дождитесь окончания обработки PDF.")
+            return
+        folder = filedialog.askdirectory(title="Выберите папку со сканами")
+        if not folder:
+            return
+        image_paths = _list_image_files(folder)
+        if not image_paths:
+            messagebox.showwarning(
+                "Нет изображений",
+                "В выбранной папке не найдены PNG/JPG/TIFF/BMP/WEBP файлы.")
+            return
+        self.output_var.set(str(self._default_output_path(folder)))
+        self._load_image_folder(folder)
+
     def _browse_output(self):
         path = filedialog.asksaveasfilename(
             title="Сохранить очищенный PDF",
@@ -1529,7 +1573,10 @@ class PdfCleanerApp(tk.Tk):
             return
 
         old_doc = self._doc
+        self._cancel_page_render_jobs()
         self._doc = new_doc
+        self._render_source_path_usable = False
+        self._render_source_path = None
         if old_doc is not None:
             try:
                 old_doc.close()
@@ -1581,7 +1628,10 @@ class PdfCleanerApp(tk.Tk):
             return False
 
         old_doc = self._doc
+        self._cancel_page_render_jobs()
         self._doc = new_doc
+        self._render_source_path_usable = False
+        self._render_source_path = None
         if old_doc is not None:
             try:
                 old_doc.close()
@@ -1636,6 +1686,9 @@ class PdfCleanerApp(tk.Tk):
             self._doc.delete_page(idx)
             self._doc.insert_pdf(page_doc, from_page=0, to_page=0, start_at=idx)
             page_doc.close()
+            self._render_source_path_usable = False
+            self._render_source_path = None
+            self._cancel_page_render_jobs()
         except Exception as e:
             messagebox.showerror("Не удалось заменить страницу", str(e))
             return False
@@ -1729,6 +1782,9 @@ class PdfCleanerApp(tk.Tk):
                 self._page_adjustments[idx] = dict(old_adjustment)
 
     def _after_document_structure_change(self, current_page):
+        self._render_source_path_usable = False
+        self._render_source_path = None
+        self._cancel_page_render_jobs()
         self._page_count = len(self._doc) if self._doc is not None else 0
         if self._page_count <= 0:
             return
@@ -2131,11 +2187,30 @@ class PdfCleanerApp(tk.Tk):
             daemon=True,
         ).start()
 
+    def _load_image_folder(self, folder):
+        if self._processing:
+            messagebox.showwarning(
+                "Подождите",
+                "Сначала дождитесь окончания обработки PDF.")
+            return
+        if self._importing:
+            return
+
+        self._import_generation += 1
+        generation = self._import_generation
+        self._set_importing_ui(True, folder)
+        threading.Thread(
+            target=self._run_image_folder_import,
+            args=(folder, generation),
+            daemon=True,
+        ).start()
+
     def _set_importing_ui(self, importing, path=None):
         self._importing = bool(importing)
         if importing:
             self._cancel_thumb_render_job()
             self._cancel_thumb_build_job()
+            self._cancel_page_render_jobs()
             if self._color_detect_job is not None:
                 try:
                     self.after_cancel(self._color_detect_job)
@@ -2154,6 +2229,8 @@ class PdfCleanerApp(tk.Tk):
                 self._st_right.config(text="импортирование PDF")
             if hasattr(self, "_import_btn"):
                 self._import_btn.config(state="disabled", fg=TXT2, bg=BG2)
+            if hasattr(self, "_import_folder_btn"):
+                self._import_folder_btn.config(state="disabled", fg=TXT2, bg=BG2)
             if hasattr(self, "_export_btn"):
                 self._export_btn.config(state="disabled", fg=TXT2, bg=BG2)
             if hasattr(self, "_run_btn"):
@@ -2171,6 +2248,9 @@ class PdfCleanerApp(tk.Tk):
             if hasattr(self, "_import_btn"):
                 self._import_btn.config(state="normal", fg=BLUE, bg=BLUE_BG,
                                         highlightbackground=BLUE_BDR)
+            if hasattr(self, "_import_folder_btn"):
+                self._import_folder_btn.config(state="normal", fg=CYAN, bg=CYAN_BG,
+                                               highlightbackground=CYAN_BDR)
             if not self._processing:
                 self._set_processing_buttons(False)
             if hasattr(self, "_canvas"):
@@ -2200,7 +2280,18 @@ class PdfCleanerApp(tk.Tk):
             if page_count <= 0:
                 raise ValueError("В PDF нет страниц")
             self._queue.put(("import_progress", generation, 20, f"Импортирование: найдено страниц {page_count}"))
-            self._queue.put(("import_opened", generation, path, doc, page_count))
+            self._queue.put((
+                "import_opened",
+                generation,
+                path,
+                doc,
+                page_count,
+                {
+                    "display_path": path,
+                    "render_source_path": path,
+                    "temporary_pdf": None,
+                },
+            ))
         except ImportError:
             self._queue.put(("import_error", generation, "Установите pymupdf:\n\npip install pymupdf"))
         except Exception as e:
@@ -2211,25 +2302,127 @@ class PdfCleanerApp(tk.Tk):
                     pass
             self._queue.put(("import_error", generation, str(e)))
 
-    def _apply_imported_doc(self, generation, path, doc, page_count):
+    def _run_image_folder_import(self, folder, generation):
+        temp_path = None
+        doc = None
+        try:
+            import fitz
+            import io
+            from PIL import Image, ImageOps
+
+            image_paths = _list_image_files(folder)
+            if not image_paths:
+                raise ValueError("В папке нет поддерживаемых изображений")
+
+            fd, temp_path = tempfile.mkstemp(prefix="crystalpdf_scan_", suffix=".pdf")
+            os.close(fd)
+            target = fitz.open()
+            try:
+                total = len(image_paths)
+                for index, image_path in enumerate(image_paths, start=1):
+                    if generation != self._import_generation:
+                        return
+
+                    with Image.open(image_path) as source:
+                        image = ImageOps.exif_transpose(source)
+                        if image.mode not in ("RGB", "L"):
+                            image = image.convert("RGB")
+                        if image.mode == "L":
+                            image = image.convert("RGB")
+
+                        dpi = image.info.get("dpi") or (300, 300)
+                        try:
+                            xdpi = float(dpi[0])
+                            ydpi = float(dpi[1])
+                        except Exception:
+                            xdpi = ydpi = 300.0
+                        xdpi = max(72.0, min(600.0, xdpi or 300.0))
+                        ydpi = max(72.0, min(600.0, ydpi or 300.0))
+
+                        page_w = max(1.0, image.width / xdpi * 72.0)
+                        page_h = max(1.0, image.height / ydpi * 72.0)
+                        buffer = io.BytesIO()
+                        image.save(buffer, format="JPEG", quality=95, optimize=True)
+
+                    page = target.new_page(width=page_w, height=page_h)
+                    page.insert_image(page.rect, stream=buffer.getvalue())
+
+                    if index == 1 or index % 10 == 0 or index == total:
+                        pct = 5.0 + (index / max(1, total)) * 90.0
+                        self._queue.put((
+                            "import_progress",
+                            generation,
+                            pct,
+                            f"Сборка PDF из сканов: {index}/{total}",
+                        ))
+
+                target.save(temp_path, garbage=4, deflate=True, clean=True)
+            finally:
+                target.close()
+
+            doc = fitz.open(temp_path)
+            self._queue.put((
+                "import_opened",
+                generation,
+                folder,
+                doc,
+                len(doc),
+                {
+                    "display_path": folder,
+                    "render_source_path": temp_path,
+                    "temporary_pdf": temp_path,
+                },
+            ))
+        except Exception as e:
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self._queue.put(("import_error", generation, str(e)))
+
+    def _apply_imported_doc(self, generation, path, doc, page_count, meta=None):
+        meta = meta or {}
         if generation != self._import_generation or not self._importing:
             try:
                 doc.close()
             except Exception:
                 pass
+            temp_pdf = meta.get("temporary_pdf")
+            if temp_pdf:
+                try:
+                    Path(temp_pdf).unlink(missing_ok=True)
+                except Exception:
+                    pass
             return
 
         old_doc = self._doc
+        old_temp_pdf = self._temporary_import_pdf
+        temp_pdf = meta.get("temporary_pdf")
         self._cancel_thumb_render_job()
         self._cancel_thumb_build_job()
+        self._cancel_page_render_jobs()
         self._color_detect_generation += 1
         self._doc = doc
+        self._render_source_path_usable = True
         if old_doc is not None:
             try:
                 old_doc.close()
             except Exception:
                 pass
-        self._input_path = path
+        if old_temp_pdf and old_temp_pdf != temp_pdf:
+            try:
+                Path(old_temp_pdf).unlink(missing_ok=True)
+            except Exception:
+                pass
+        self._temporary_import_pdf = temp_pdf
+        self._input_path = meta.get("display_path") or path
+        self._render_source_path = meta.get("render_source_path") or path
         self._page_count = int(page_count)
         self._current_page = 0
         self._pan_x = 0
@@ -2251,7 +2444,7 @@ class PdfCleanerApp(tk.Tk):
             self.clean_count_var.set(max(1, self._page_count))
         self._sync_clean_count_controls()
 
-        fname = os.path.basename(path)
+        fname = os.path.basename(str(self._input_path))
         self._title_label.config(text=f"✦  CrystalPDF  ·  {fname}")
         self._file_chip.config(text=fname, fg=TXT1)
 
@@ -2270,7 +2463,7 @@ class PdfCleanerApp(tk.Tk):
         self._sb_status_var.set(
             f"Импортировано: {os.path.basename(path)} · {self._page_count} стр.")
         self._update_status_bar()
-        self._schedule_color_detection(path, delay=900)
+        self._schedule_color_detection(self._render_source_path or path, delay=900)
 
     def _finish_import_error(self, generation, error_text):
         if generation != self._import_generation:
@@ -2297,6 +2490,15 @@ class PdfCleanerApp(tk.Tk):
 
         self._color_detect_generation += 1
         generation = self._color_detect_generation
+        self._color_detecting = True
+        self._color_detect_scanned = 0
+        self._color_detect_total = max(0, int(self._page_count or 0))
+        self._update_status_bar()
+        if False and self._page_count > AUTO_COLOR_DETECT_PAGE_LIMIT:
+            if hasattr(self, "_color_info_lbl"):
+                self._color_info_lbl.config(
+                    text="Р¦РІРµС‚ Р±СѓРґРµС‚ РѕРїСЂРµРґРµР»СЏС‚СЊСЃСЏ РїРѕСЃС‚СЂР°РЅРёС‡РЅРѕ РїСЂРё РѕР±СЂР°Р±РѕС‚РєРµ")
+            return
 
         def start_detection():
             self._color_detect_job = None
@@ -2352,12 +2554,19 @@ class PdfCleanerApp(tk.Tk):
             pass
 
     # ── ВИДЖЕТЫ МИНИАТЮР ──────────────────────────────────────────────────────
+    def _bind_thumb_click(self, widget, idx):
+        widget.bind("<Button-1>", lambda _e, page_idx=idx: self._go_page(page_idx))
+        try:
+            for child in widget.winfo_children():
+                self._bind_thumb_click(child, idx)
+        except Exception:
+            pass
+
     def _create_thumb_widget(self, i):
         f = tk.Frame(self._thumb_inner, bg=BG1, cursor="hand2",
                      highlightthickness=2,
                      highlightbackground=BDR if i != 0 else BLUE)
         f.pack(side="left", padx=(4 if i == 0 else 2, 2), pady=4)
-        f.bind("<Button-1>", lambda e, idx=i: self._go_page(idx))
 
         thumb_bg = tk.Frame(f, bg=WHITE_PAGE,
                             width=self._ui.px(44), height=self._ui.px(58))
@@ -2383,6 +2592,7 @@ class PdfCleanerApp(tk.Tk):
 
         self._thumb_frames.append((f, dot, rot_lbl))
         self._thumb_containers[i] = thumb_bg
+        self._bind_thumb_click(f, i)
         self._update_thumb_status(i)
 
     def _build_thumb_widgets(self):
@@ -2453,10 +2663,13 @@ class PdfCleanerApp(tk.Tk):
         self._thumb_build_done_callback = None
         if callback:
             callback()
-        for idx in range(min(self._page_count, 18)):
+        initial_count = 4 if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT else 18
+        for idx in range(min(self._page_count, initial_count)):
             self._queue_thumb_render(idx)
         self._queue_thumb_render(self._current_page, priority=True)
-        self._schedule_visible_thumb_render(delay=120)
+        self._schedule_visible_thumb_render(
+            delay=700 if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT else 120
+        )
         self._thumb_canvas.after(50, lambda: self._thumb_canvas.xview_moveto(0))
 
     def _cancel_thumb_render_job(self):
@@ -2483,6 +2696,16 @@ class PdfCleanerApp(tk.Tk):
         self._thumb_build_done_callback = None
         self._thumb_build_next = 0
 
+    def _cancel_page_render_jobs(self):
+        self._page_render_generation += 1
+        if self._page_render_after_job is not None:
+            try:
+                self.after_cancel(self._page_render_after_job)
+            except Exception:
+                pass
+            self._page_render_after_job = None
+        self._page_render_pending = None
+
     def _thumb_xview(self, *args):
         if not hasattr(self, "_thumb_canvas"):
             return
@@ -2508,7 +2731,8 @@ class PdfCleanerApp(tk.Tk):
         if self._doc is None or not getattr(self, "_thumb_frames", None):
             return
 
-        for idx in range(max(0, self._current_page - 3), min(self._page_count, self._current_page + 4)):
+        near = 1 if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT else 3
+        for idx in range(max(0, self._current_page - near), min(self._page_count, self._current_page + near + 1)):
             self._queue_thumb_render(idx, priority=True)
 
         try:
@@ -2523,11 +2747,16 @@ class PdfCleanerApp(tk.Tk):
             left -= preload
             right += preload
 
+            queued_visible = 0
+            visible_limit = 4 if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT else None
             for idx, (frame, _dot, _rot_lbl) in enumerate(self._thumb_frames):
                 x0 = frame.winfo_x()
                 x1 = x0 + max(1, frame.winfo_width())
                 if x1 >= left and x0 <= right:
                     self._queue_thumb_render(idx)
+                    queued_visible += 1
+                    if visible_limit is not None and queued_visible >= visible_limit:
+                        break
         except Exception:
             pass
 
@@ -2551,14 +2780,16 @@ class PdfCleanerApp(tk.Tk):
 
     def _schedule_thumb_render(self):
         if self._thumb_render_job is None and self._thumb_render_queue:
-            self._thumb_render_job = self.after(20, self._render_next_thumb_batch)
+            delay = 160 if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT else 20
+            self._thumb_render_job = self.after(delay, self._render_next_thumb_batch)
 
     def _render_next_thumb_batch(self):
         self._thumb_render_job = None
         if self._importing:
             return
         rendered = 0
-        while self._thumb_render_queue and rendered < 2:
+        batch_limit = 1 if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT else 2
+        while self._thumb_render_queue and rendered < batch_limit:
             idx = self._thumb_render_queue.pop(0)
             container = self._thumb_containers.get(idx)
             if container is None or idx in self._thumb_rendered:
@@ -2602,8 +2833,7 @@ class PdfCleanerApp(tk.Tk):
             lbl = tk.Label(container, image=photo, bg=WHITE_PAGE)
             lbl.image = photo
             lbl.pack()
-            lbl.bind("<Button-1>",
-                     lambda e, i=idx: self._go_page(i))
+            self._bind_thumb_click(container, idx)
         except Exception:
             pass
 
@@ -2697,6 +2927,224 @@ class PdfCleanerApp(tk.Tk):
 
     # ── ОТРИСОВКА СТРАНИЦЫ ────────────────────────────────────────────────────
     def _render_page(self):
+        if self._can_render_page_async():
+            self._request_page_render()
+            return
+        self._render_page_sync()
+
+    def _can_render_page_async(self):
+        return (
+            self._doc is not None
+            and not self._importing
+            and not self._processing
+            and self._page_count >= ASYNC_PAGE_RENDER_PAGE_LIMIT
+            and bool(self._render_source_path)
+            and bool(self._render_source_path_usable)
+        )
+
+    def _render_dpr_for_page(self):
+        dpr = float(getattr(self._ui, "render_dpr", 1.0))
+        if self._page_count > LARGE_DOCUMENT_PAGE_LIMIT:
+            return max(1.0, min(dpr, 1.2))
+        return max(1.0, min(dpr, 1.6))
+
+    def _make_page_render_request(self):
+        idx = max(0, min(self._page_count - 1, self._current_page))
+        self._page_render_generation += 1
+        brightness, contrast = self._page_adjustment_values(idx)
+        return {
+            "generation": self._page_render_generation,
+            "path": self._render_source_path,
+            "idx": idx,
+            "page_count": self._page_count,
+            "cw": max(self._canvas.winfo_width(), 100),
+            "ch": max(self._canvas.winfo_height(), 100),
+            "zoom": float(self._zoom),
+            "dpr": self._render_dpr_for_page(),
+            "rotation": int(self._rotations.get(idx, 0)),
+            "masks": list(self._eraser_masks.get(idx, [])),
+            "crop_box": self._crop_boxes.get(idx),
+            "protected_boxes": _sanitize_norm_boxes(self._protected_boxes.get(idx)),
+            "brightness": brightness,
+            "contrast": contrast,
+            "skip_adjust": bool(self._skip_pages.get(idx, False) or self._is_page_outside_clean_limit(idx)),
+        }
+
+    def _request_page_render(self):
+        request = self._make_page_render_request()
+        self._page_render_pending = request
+        self._draw_page_render_placeholder(request["idx"])
+        if self._page_render_after_job is not None:
+            try:
+                self.after_cancel(self._page_render_after_job)
+            except Exception:
+                pass
+            self._page_render_after_job = None
+        if not self._page_render_active:
+            self._page_render_after_job = self.after(45, self._start_pending_page_render)
+
+    def _start_pending_page_render(self):
+        self._page_render_after_job = None
+        if self._page_render_active or not self._page_render_pending:
+            return
+        request = self._page_render_pending
+        self._page_render_pending = None
+        self._page_render_active = True
+        threading.Thread(
+            target=self._render_page_worker,
+            args=(request,),
+            daemon=True,
+        ).start()
+
+    def _finish_page_render_worker(self):
+        self._page_render_active = False
+        if self._page_render_pending and self._page_render_after_job is None:
+            self._page_render_after_job = self.after(1, self._start_pending_page_render)
+
+    def _draw_page_render_placeholder(self, idx):
+        self._canvas.delete("all")
+        self._page_render_w = 0
+        self._page_render_h = 0
+        self._page_full_render_w = 0
+        self._page_full_render_h = 0
+        self._display_box = (0.0, 0.0, 1.0, 1.0)
+        w = self._canvas.winfo_width() or 600
+        h = self._canvas.winfo_height() or 400
+        self._canvas.create_text(
+            w // 2,
+            h // 2,
+            text=f"Р—Р°РіСЂСѓР·РєР° СЃС‚СЂР°РЅРёС†С‹ {idx + 1}...",
+            fill=TXT2,
+            font=("Segoe UI", 12, "bold"),
+        )
+
+    def _render_page_worker(self, request):
+        try:
+            import fitz
+            from PIL import Image
+
+            doc = fitz.open(request["path"])
+            try:
+                page = doc.load_page(request["idx"])
+                page_w, page_h = page.rect.width, page.rect.height
+                rot = int(request["rotation"])
+                if rot in (90, 270):
+                    page_w, page_h = page_h, page_w
+                pad = 24
+                fit_scale = min((request["cw"] - pad * 2) / page_w, (request["ch"] - pad * 2) / page_h)
+                fit_scale = max(0.05, fit_scale)
+                scale = fit_scale * float(request["zoom"])
+                dpr = float(request["dpr"])
+                mat = fitz.Matrix(scale * dpr, scale * dpr).prerotate(rot)
+                pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+                full_img = Image.frombytes("RGB", (pix.w, pix.h), pix.samples)
+            finally:
+                doc.close()
+
+            if dpr > 1.01:
+                target_w = max(1, int(round(pix.w / dpr)))
+                target_h = max(1, int(round(pix.h / dpr)))
+                full_img = full_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+            protected_source = full_img.copy()
+            if not request["skip_adjust"]:
+                full_img = _adjust_pil_image(
+                    full_img,
+                    request["brightness"],
+                    request["contrast"],
+                )
+
+            if request["masks"]:
+                _apply_eraser(full_img, request["masks"])
+            _restore_protected_region(full_img, protected_source, request["protected_boxes"])
+
+            raw_crop = request["crop_box"]
+            crop = _sanitize_norm_box(raw_crop) or (0.0, 0.0, 1.0, 1.0)
+            has_crop = raw_crop is not None and crop != (0.0, 0.0, 1.0, 1.0)
+            if has_crop:
+                x0, y0, x1, y1 = crop
+                left = min(max(0, int(round(x0 * full_img.width))), max(0, full_img.width - 1))
+                top = min(max(0, int(round(y0 * full_img.height))), max(0, full_img.height - 1))
+                right = min(full_img.width, max(left + 1, int(round(x1 * full_img.width))))
+                bottom = min(full_img.height, max(top + 1, int(round(y1 * full_img.height))))
+                img = full_img.crop((left, top, right, bottom))
+            else:
+                img = full_img
+
+            self._queue.put((
+                "page_render_done",
+                request["generation"],
+                request["idx"],
+                {
+                    "image": img,
+                    "page_w": page_w,
+                    "page_h": page_h,
+                    "scale": scale,
+                    "display_box": crop,
+                    "has_crop": has_crop,
+                    "full_w": full_img.width,
+                    "full_h": full_img.height,
+                    "rotation": rot,
+                },
+            ))
+        except Exception as e:
+            self._queue.put(("page_render_error", request["generation"], request["idx"], str(e)))
+
+    def _apply_page_render_result(self, idx, result):
+        from PIL import ImageTk
+
+        if idx != self._current_page:
+            return
+        img = result["image"]
+        self._page_view_w_pt = result["page_w"]
+        self._page_view_h_pt = result["page_h"]
+        self._display_box = result["display_box"]
+        self._page_full_render_w = result["full_w"]
+        self._page_full_render_h = result["full_h"]
+        self._page_render_w = img.width
+        self._page_render_h = img.height
+        self._page_render_ox, self._page_render_oy = self._page_origin(
+            max(self._canvas.winfo_width(), 100),
+            max(self._canvas.winfo_height(), 100),
+            img.width,
+            img.height,
+            24,
+        )
+        self._page_render_scale = result["scale"]
+
+        photo = ImageTk.PhotoImage(img)
+        self._page_photo = photo
+        self._canvas.delete("all")
+        ox, oy = self._page_render_ox, self._page_render_oy
+        pw, ph = img.width, img.height
+        self._canvas.create_rectangle(
+            ox + 6, oy + 6, ox + pw + 6, oy + ph + 6,
+            fill="#000000", outline="", tags=("page_layer",))
+        self._canvas.create_image(ox, oy, anchor="nw", image=photo,
+                                  tags=("page_layer",))
+
+        if result["rotation"]:
+            self._canvas.create_text(
+                ox + pw - 6, oy + 6,
+                text=f"{result['rotation']}В°", anchor="ne",
+                fill=BLUE, font=("Courier New", 9, "bold"),
+                tags=("page_layer",))
+
+        if self._color_pages.get(idx, False):
+            self._canvas.create_rectangle(
+                ox, oy + ph - 6, ox + pw, oy + ph,
+                fill=AMBER, outline="", tags=("page_layer",))
+
+        self._draw_edge_zone_overlay(result["page_w"], result["page_h"])
+        self._draw_protected_box_overlay()
+        self._draw_skip_page_overlay()
+
+        if result["has_crop"]:
+            self._canvas.create_rectangle(
+                ox, oy, ox + pw, oy + ph,
+                outline=GREEN, width=2, tags=("page_layer",))
+
+    def _render_page_sync(self):
         if self._importing:
             self._draw_import_placeholder()
             return
@@ -4078,12 +4526,33 @@ class PdfCleanerApp(tk.Tk):
                         self._st_main.config(text="импортирование", fg=BLUE)
 
                 elif kind == "import_opened":
-                    _, generation, path, doc, page_count = msg
-                    self._apply_imported_doc(generation, path, doc, page_count)
+                    _, generation, path, doc, page_count, *rest = msg
+                    meta = rest[0] if rest else None
+                    self._apply_imported_doc(generation, path, doc, page_count, meta)
 
                 elif kind == "import_error":
                     _, generation, error_text = msg
                     self._finish_import_error(generation, error_text)
+
+                elif kind == "page_render_done":
+                    _, generation, idx, result = msg
+                    self._finish_page_render_worker()
+                    if (
+                        generation == self._page_render_generation
+                        and idx == self._current_page
+                        and self._can_render_page_async()
+                    ):
+                        self._apply_page_render_result(idx, result)
+
+                elif kind == "page_render_error":
+                    _, generation, idx, error_text = msg
+                    self._finish_page_render_worker()
+                    if generation == self._page_render_generation and idx == self._current_page:
+                        self._canvas.delete("all")
+                        self._canvas.create_text(
+                            24, 24,
+                            text=f"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕРєР°Р·Р°С‚СЊ СЃС‚СЂР°РЅРёС†Сѓ\n{error_text}",
+                            anchor="nw", fill=RED, font=("Segoe UI", 10))
 
                 elif kind == "progress":
                     _, pct, text = msg
