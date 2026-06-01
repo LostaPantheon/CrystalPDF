@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title CrystalPDF v1.1.0 - сборка EXE
+title CrystalPDF v2.0.0 - сборка EXE
 
 echo.
 echo  ==========================================
-echo       CrystalPDF v1.1.0 - установка и сборка
+echo       CrystalPDF v2.0.0 - установка и сборка
 echo  ==========================================
 echo.
 
@@ -25,7 +25,7 @@ if errorlevel 1 (
 
 echo.
 echo  [2/3] Сборка приложения...
-python -m PyInstaller CrystalPDF.spec --clean --noconfirm
+python -m PyInstaller CrystalPDF-v2.0.0.spec --clean --noconfirm
 if errorlevel 1 (
     echo  [ОШИБКА] Сборка не удалась.
     pause
@@ -34,9 +34,9 @@ if errorlevel 1 (
 
 echo.
 echo  [3/3] Готово.
-echo  EXE: dist\CrystalPDF-v1.1.0.exe
+echo  EXE: dist\CrystalPDF-v2.0.0.exe
 echo.
 
-if exist "dist\CrystalPDF-v1.1.0.exe" explorer dist
+if exist "dist\CrystalPDF-v2.0.0.exe" explorer dist
 
 pause
