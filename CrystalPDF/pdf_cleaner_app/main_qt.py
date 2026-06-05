@@ -225,6 +225,22 @@ def document_preview_payload(doc: fitz.Document, preview_page: int = 1) -> tuple
     return preview, thumbs
 
 
+def estimate_color_pages_document(doc: fitz.Document) -> int:
+    total = len(doc)
+    if total <= 0:
+        return 0
+    count = 0
+    limit = min(total, 80)
+    for idx in range(limit):
+        page = doc.load_page(idx)
+        img = render_page_rgb(page, 72)
+        if pil_image_has_color(img, max_pixels=60_000):
+            count += 1
+    if limit < total:
+        count = round(count * total / limit)
+    return count
+
+
 def clamp_pct(value: object, default: float = 0.0) -> float:
     try:
         number = float(value)
@@ -519,6 +535,47 @@ def images_to_pdf(folder: Path, output_path: Path, progress, cancel_requested) -
                 pass
 
 
+class PdfLoadWorker(QThread):
+    finished_ok = Signal(str, int, int, str, object, int, bool)
+    failed = Signal(str)
+
+    def __init__(self, path: Path, page_number: int = 1, reset_edits: bool = True):
+        super().__init__()
+        self.path = path
+        self.page_number = page_number
+        self.reset_edits = reset_edits
+
+    def cancel(self) -> None:
+        pass
+
+    def run(self) -> None:
+        try:
+            preview = ""
+            thumbs: list[dict[str, object]] = []
+            doc = fitz.open(str(self.path))
+            try:
+                page_count = len(doc)
+                color_count = estimate_color_pages_document(doc)
+                page_number = max(1, min(int(self.page_number or 1), max(1, page_count)))
+                try:
+                    preview, thumbs = document_preview_payload(doc, page_number)
+                except Exception:
+                    preview, thumbs = "", []
+            finally:
+                doc.close()
+            self.finished_ok.emit(
+                str(self.path),
+                page_count,
+                color_count,
+                preview,
+                thumbs,
+                page_number,
+                self.reset_edits,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class CleanWorker(QThread):
     progress_changed = Signal(int, str)
     finished_ok = Signal(str, int, int)
@@ -670,7 +727,7 @@ class CrystalPdfQtApp(QMainWindow):
         self.color_count = 0
         self.current_page = 1
         self.page_edits: dict[int, dict[str, object]] = {}
-        self.worker: CleanWorker | ImageImportWorker | None = None
+        self.worker: PdfLoadWorker | CleanWorker | ImageImportWorker | None = None
 
         self.view = QWebEngineView(self)
         self.setCentralWidget(self.view)
@@ -693,10 +750,22 @@ class CrystalPdfQtApp(QMainWindow):
         arg_text = ", ".join(json.dumps(arg, ensure_ascii=False) for arg in args)
         self.js(f"window.crystalUI && window.crystalUI.{name}({arg_text});")
 
+    def has_processed_output(self) -> bool:
+        return bool(self.last_output_path and self.last_output_path.exists())
+
+    def refresh_download_state(self) -> None:
+        self.ui_call("setDownloadReady", self.has_processed_output())
+
+    def mark_result_stale(self) -> None:
+        if self.last_output_path is not None:
+            self.last_output_path = None
+            self.refresh_download_state()
+
     def on_ui_ready(self) -> None:
         self.ui_call("setProgress", 0, "Готов · откройте PDF")
         self.ui_call("setStats", 0, 0, 0, 0)
         self.ui_call("setProcessing", False)
+        self.refresh_download_state()
         self.ui_call("setStatus", "● Готов к работе", "ready")
 
     def settings_path(self) -> Path:
@@ -886,6 +955,8 @@ class CrystalPdfQtApp(QMainWindow):
             return False, str(exc)
 
     def set_option(self, name: str, value: str) -> None:
+        if self.is_busy():
+            return
         bool_value = value == "1" or value.casefold() in {"true", "yes", "да"}
         int_names = {
             "dot_area",
@@ -907,14 +978,19 @@ class CrystalPdfQtApp(QMainWindow):
         if name in int_names:
             try:
                 setattr(self.options, name, int(float(value)))
+                self.mark_result_stale()
             except ValueError:
                 pass
         elif name in bool_names:
             setattr(self.options, name, bool_value)
+            self.mark_result_stale()
         elif name in {"compression_level", "compression_scope"}:
             setattr(self.options, name, value)
+            self.mark_result_stale()
 
     def set_mode(self, value: str) -> None:
+        if self.is_busy():
+            return
         text = value.casefold()
         if "лёг" in text or "лег" in text:
             self.options.mode = "gentle"
@@ -922,6 +998,7 @@ class CrystalPdfQtApp(QMainWindow):
             self.options.mode = "strong"
         else:
             self.options.mode = "standard"
+        self.mark_result_stale()
 
     def import_pdf(self) -> None:
         if self.is_busy():
@@ -943,7 +1020,7 @@ class CrystalPdfQtApp(QMainWindow):
             return
         folder_path = Path(folder)
         out = unique_output_path(downloads_dir() / f"{folder_path.name}_CrystalPDF.pdf")
-        self.ui_call("setProcessing", True)
+        self.ui_call("setProcessing", True, "Импорт сканов")
         self.ui_call("setProgress", 0, "Импорт изображений")
         self.ui_call("setStatus", "Импорт изображений", "working")
         worker = ImageImportWorker(folder_path, out)
@@ -955,44 +1032,57 @@ class CrystalPdfQtApp(QMainWindow):
 
     def on_images_imported(self, path: str, total: int) -> None:
         self.worker = None
-        self.ui_call("setProcessing", False)
-        self.load_pdf(Path(path))
         self.ui_call("setProgress", 100, f"Собран PDF из изображений: {total}")
-        self.ui_call("setStatus", "● Готов к работе", "ready")
+        self.load_pdf(Path(path))
 
     def load_pdf(self, path: Path, page_number: int = 1, reset_edits: bool = True) -> None:
-        preview = ""
-        thumbs: list[dict[str, object]] = []
-        try:
-            doc = fitz.open(str(path))
-            try:
-                self.page_count = len(doc)
-                self.color_count = self.estimate_color_pages(doc)
-                page_number = max(1, min(int(page_number or 1), max(1, self.page_count)))
-                try:
-                    preview, thumbs = document_preview_payload(doc, page_number)
-                except Exception:
-                    preview, thumbs = "", []
-            finally:
-                doc.close()
-        except Exception as exc:
-            QMessageBox.critical(self, "Ошибка PDF", str(exc))
+        if self.is_busy():
             return
+        self.last_output_path = None
+        self.refresh_download_state()
+        self.ui_call("setProcessing", True, "Открытие PDF")
+        self.ui_call("setProgress", 0, f"Открытие PDF: {path.name}")
+        self.ui_call("setStatus", "◉ Открытие PDF", "working")
 
-        self.input_path = path
-        self.output_path = unique_output_path(default_output_path(path))
+        worker = PdfLoadWorker(path, page_number, reset_edits)
+        self.worker = worker
+        worker.finished_ok.connect(self.on_pdf_loaded)
+        worker.failed.connect(self.on_worker_failed)
+        worker.start()
+
+    def on_pdf_loaded(
+        self,
+        path: str,
+        page_count: int,
+        color_count: int,
+        preview: str,
+        thumbs: object,
+        page_number: int,
+        reset_edits: bool,
+    ) -> None:
+        self.worker = None
+        path_obj = Path(path)
+        self.input_path = path_obj
+        self.page_count = page_count
+        self.color_count = color_count
+        self.output_path = unique_output_path(default_output_path(path_obj))
         self.last_output_path = None
         self.current_page = page_number
         if reset_edits:
             self.page_edits = {}
-        self.ui_call("setFile", path.name)
+        thumb_payload = thumbs if isinstance(thumbs, list) else []
+        self.ui_call("setFile", path_obj.name)
         self.ui_call("setOutput", str(self.output_path))
         self.ui_call("setStats", self.page_count, self.color_count, 0, 0)
-        self.ui_call("setDocument", path.name, self.page_count, self.color_count, preview, thumbs, self.current_page)
-        self.ui_call("setProgress", 0, f"Открыт PDF: {path.name}")
+        self.ui_call("setDocument", path_obj.name, self.page_count, self.color_count, preview, thumb_payload, self.current_page)
+        self.ui_call("setProgress", 0, f"Открыт PDF: {path_obj.name}")
+        self.ui_call("setProcessing", False)
+        self.refresh_download_state()
         self.ui_call("setStatus", "● Готов к работе", "ready")
 
     def sync_page_edits(self, page_number: int, payload: str) -> None:
+        if self.is_busy():
+            return
         try:
             page_number = max(1, int(page_number or 1))
             data = json.loads(payload) if payload else {}
@@ -1001,9 +1091,12 @@ class CrystalPdfQtApp(QMainWindow):
             return
 
         if edits.get("skip") or has_page_visual_edits(edits):
-            self.page_edits[page_number] = edits
-        else:
+            if self.page_edits.get(page_number) != edits:
+                self.page_edits[page_number] = edits
+                self.mark_result_stale()
+        elif page_number in self.page_edits:
             self.page_edits.pop(page_number, None)
+            self.mark_result_stale()
 
     def render_page_preview(self, page_number: int) -> None:
         if not self.input_path or self.is_busy():
@@ -1054,44 +1147,40 @@ class CrystalPdfQtApp(QMainWindow):
         self.ui_call("setDeskewAngle", page_number, float(angle))
 
     def estimate_color_pages(self, doc: fitz.Document) -> int:
-        total = len(doc)
-        if total <= 0:
-            return 0
-        count = 0
-        limit = min(total, 80)
-        for idx in range(limit):
-            page = doc.load_page(idx)
-            img = render_page_rgb(page, 72)
-            if pil_image_has_color(img, max_pixels=60_000):
-                count += 1
-        if limit < total:
-            count = round(count * total / limit)
-        return count
+        return estimate_color_pages_document(doc)
 
     def export_pdf(self) -> None:
         if self.is_busy():
             return
-        if self.last_output_path and self.last_output_path.exists():
-            target, _ = QFileDialog.getSaveFileName(
-                self,
-                "Сохранить PDF",
-                str(self.last_output_path),
-                "PDF (*.pdf)",
-            )
-            if target:
-                shutil.copyfile(self.last_output_path, target)
-                self.ui_call("setProgress", 100, f"Экспорт готов: {Path(target).name}")
+        if not self.has_processed_output():
+            self.refresh_download_state()
+            QMessageBox.information(self, APP_TITLE, "Сначала запустите очистку и дождитесь завершения обработки.")
             return
-        self.start_cleaning(export_after=True)
+
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Сохранить PDF",
+            str(self.last_output_path),
+            "PDF (*.pdf)",
+        )
+        if target:
+            output = Path(target)
+            if output.suffix.lower() != ".pdf":
+                output = output.with_suffix(".pdf")
+            shutil.copyfile(self.last_output_path, output)
+            self.ui_call("setProgress", 100, f"Экспорт готов: {output.name}")
 
     def export_current_page(self) -> None:
         if self.is_busy():
             return
-        if not self.input_path:
-            QMessageBox.information(self, APP_TITLE, "Сначала импортируйте PDF.")
+        if not self.has_processed_output():
+            self.refresh_download_state()
+            QMessageBox.information(self, APP_TITLE, "Сначала запустите очистку и дождитесь завершения обработки.")
             return
 
-        default_name = downloads_dir() / f"{self.input_path.stem}_page_{self.current_page}.pdf"
+        source_path = self.last_output_path
+        default_stem = (self.input_path or source_path or Path("scan")).stem
+        default_name = downloads_dir() / f"{default_stem}_page_{self.current_page}.pdf"
         target, _ = QFileDialog.getSaveFileName(
             self,
             "Скачать текущую страницу",
@@ -1106,20 +1195,11 @@ class CrystalPdfQtApp(QMainWindow):
             output = output.with_suffix(".pdf")
 
         try:
-            source = fitz.open(str(self.input_path))
+            source = fitz.open(str(source_path))
             result = fitz.open()
             try:
                 page_index = max(0, min(self.current_page - 1, len(source) - 1))
-                edits = self.page_edits.get(page_index + 1, {})
-                page = source.load_page(page_index)
-                has_adjustments = self.options.brightness != 0 or self.options.contrast != 100
-                if has_page_visual_edits(edits) or has_adjustments:
-                    rgb = render_page_rgb(page, DEFAULT_DPI)
-                    out_img = adjust_pil_image(rgb, self.options.brightness, self.options.contrast)
-                    out_img = apply_page_edits(out_img, rgb, edits)
-                    insert_pil_page(result, image_page_rect(out_img), out_img, self.options, color=True)
-                else:
-                    result.insert_pdf(source, from_page=page_index, to_page=page_index)
+                result.insert_pdf(source, from_page=page_index, to_page=page_index)
                 result.save(str(output), garbage=4, deflate=True, clean=True)
             finally:
                 result.close()
@@ -1236,12 +1316,14 @@ class CrystalPdfQtApp(QMainWindow):
             output = output.with_suffix(".pdf")
         output = unique_output_path(output)
         self.output_path = output
+        self.last_output_path = None
         self.ui_call("setOutput", str(output))
-        self.ui_call("setProcessing", True)
+        self.refresh_download_state()
+        self.ui_call("setProcessing", True, "Идёт очистка")
         self.ui_call("setProgress", 0, "Запуск обработки…")
         self.ui_call("setStatus", "◉ Обработка", "working")
 
-        worker = CleanWorker(self.input_path, output, self.options, copy.deepcopy(self.page_edits))
+        worker = CleanWorker(self.input_path, output, copy.deepcopy(self.options), copy.deepcopy(self.page_edits))
         self.worker = worker
         worker.progress_changed.connect(lambda pct, text: self.ui_call("setProgress", pct, text))
         worker.finished_ok.connect(self.on_clean_finished)
@@ -1252,6 +1334,7 @@ class CrystalPdfQtApp(QMainWindow):
         self.worker = None
         self.last_output_path = Path(output)
         self.ui_call("setProcessing", False)
+        self.refresh_download_state()
         self.ui_call("setProgress", 100, f"Готово → {self.last_output_path.name}")
         self.ui_call("setStats", self.page_count, max(self.color_count, colors), processed, 0)
         self.ui_call("setStatus", "✓ Готово", "ready")
@@ -1259,6 +1342,7 @@ class CrystalPdfQtApp(QMainWindow):
     def on_worker_failed(self, message: str) -> None:
         self.worker = None
         self.ui_call("setProcessing", False)
+        self.refresh_download_state()
         self.ui_call("setProgress", 0, message)
         self.ui_call("setStatus", "✗ Ошибка", "error")
         if "отмен" not in message.casefold():

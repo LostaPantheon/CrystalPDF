@@ -1,11 +1,9 @@
 # Авторы
 
-CrystalPDF v1.1.0 создан и поддерживается авторами:
+CrystalPDF v2.0.0 создан и поддерживается авторами:
 
 - LostaPantheon
 - LAIDUM
 - Ex1zeN
-
-Три автора, один проект: все за один PDF, и один PDF за всех.
 
 Авторские права © 2026 LostaPantheon, LAIDUM и Ex1zeN.

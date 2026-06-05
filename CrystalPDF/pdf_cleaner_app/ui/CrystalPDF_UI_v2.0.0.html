@@ -197,6 +197,18 @@ body::after{
 .btn-r:hover{background:rgba(255,95,126,.14);border-color:rgba(255,95,126,.48)}
 .btn-v{background:linear-gradient(135deg,rgba(157,123,255,.1),rgba(244,114,182,.06));border-color:rgba(157,123,255,.3);color:var(--vi)}
 .btn-v:hover{background:rgba(157,123,255,.18);border-color:rgba(157,123,255,.5)}
+.btn:disabled,.btn.is-locked,.cancel-btn:disabled{
+  cursor:not-allowed;opacity:.46;filter:saturate(.65);
+  box-shadow:none;transform:none;
+}
+.btn:disabled::after,.btn.is-locked::after{
+  content:'';position:absolute;inset:0;border-radius:inherit;
+  background:linear-gradient(135deg,rgba(255,255,255,.035),rgba(255,255,255,.008));
+  pointer-events:none;
+}
+.btn:disabled:hover,.btn.is-locked:hover,.cancel-btn:disabled:hover{
+  box-shadow:none;color:var(--t1);
+}
 .btn-mega{
   padding:14px;font-size:14px;font-weight:800;
   background:linear-gradient(135deg,rgba(0,229,255,.16),rgba(157,123,255,.12));
@@ -355,6 +367,12 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .tb-btn.cy-c:hover{background:var(--c0d)}
 .tb-btn.rd-c{color:var(--rd)}
 .tb-btn.rd-c:hover{background:var(--rdd)}
+.tb-btn:disabled,.nav-btn:disabled,.sb-input:disabled,.sb-select:disabled,input[type=range]:disabled{
+  cursor:not-allowed;opacity:.48;filter:saturate(.65);
+}
+.tb-btn:disabled:hover,.nav-btn:disabled:hover{
+  background:transparent;color:var(--t1);border-color:transparent;
+}
 .tb-sep{width:1px;height:20px;background:var(--bd2);margin:0 6px;flex-shrink:0}
 .tb-right{margin-left:auto;display:flex;align-items:center;gap:4px}
 .zoom-lbl{font-family:var(--mono);font-size:11px;color:var(--t1);padding:0 6px;min-width:46px;text-align:center}
@@ -369,6 +387,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .canvas-wrap[data-tool="eraser"]{cursor:crosshair}
 .canvas-wrap[data-tool="crop"]{cursor:crosshair}
 .canvas-wrap[data-tool="protect"]{cursor:crosshair}
+.is-processing .canvas-wrap{pointer-events:none;cursor:wait}
 .canvas-wrap::before{
   content:'';position:absolute;inset:0;pointer-events:none;
   background-image:radial-gradient(circle,rgba(255,255,255,.052) 1px,transparent 1px);
@@ -922,7 +941,7 @@ document.querySelectorAll('.toggle-wrap').forEach(w => {
   w.addEventListener('click', e => {
     e.preventDefault();
     const inp = w.querySelector('input');
-    if (!inp) return;
+    if (!inp || inp.disabled) return;
     inp.checked = !inp.checked;
     inp.dispatchEvent(new Event('change', { bubbles: true }));
   });
@@ -957,6 +976,7 @@ document.querySelectorAll('.thumb-item').forEach(item => {
 /* ─── Ripple effect on buttons ─── */
 document.querySelectorAll('.btn').forEach(btn => {
   btn.addEventListener('click', function(e) {
+    if (this.disabled) return;
     const r = document.createElement('span');
     r.className = 'ripple';
     const rect = this.getBoundingClientRect();
@@ -987,9 +1007,46 @@ document.querySelectorAll('input[type=range]').forEach(r => {
 
 let currentDocument = { name: '', pages: 0, color: 0, page: 1, edits: 0, zoom: 1 };
 let currentTool = 'pan';
+let processingActive = false;
+let downloadReady = false;
 const pageStates = new Map();
 const undoStack = [];
 const redoStack = [];
+
+function buttonTextHas(btn, values) {
+  const text = (btn?.textContent || '').replace(/\s+/g, ' ').trim();
+  return values.some(value => text.includes(value));
+}
+
+function downloadButtons() {
+  return Array.from(document.querySelectorAll('.btn')).filter(btn =>
+    buttonTextHas(btn, ['Экспорт PDF', 'Скачать текущую'])
+  );
+}
+
+function applyActionLocks() {
+  const canDownload = downloadReady && !processingActive;
+  const downloads = new Set(downloadButtons());
+  document.body.classList.toggle('is-processing', processingActive);
+
+  Array.from(document.querySelectorAll('.btn')).forEach(btn => {
+    if (btn.id === 'megaBtn' || downloads.has(btn)) return;
+    btn.disabled = processingActive;
+    btn.classList.toggle('is-locked', processingActive);
+    btn.title = processingActive ? 'Дождитесь завершения операции' : '';
+  });
+
+  document.querySelectorAll('.sb-input,.sb-select,input[type=range],.toggle-wrap input,.toolbar .tb-btn,.nav-btn').forEach(ctrl => {
+    ctrl.disabled = processingActive;
+  });
+
+  downloads.forEach(btn => {
+    btn.disabled = !canDownload;
+    btn.classList.toggle('is-locked', !canDownload);
+    btn.title = canDownload ? '' : 'Доступно после полной обработки PDF';
+  });
+}
+applyActionLocks();
 
 function makePageState() {
   return { panX: 0, panY: 0, rotation: 0, deskew: 0, skip: false, overlays: [] };
@@ -1707,6 +1764,7 @@ window.crystalUI = {
   setDocument(name, pages, color, preview, thumbs, activePage=1) {
     this.setFile(name);
     this.setStats(pages, color, 0, 0);
+    this.setDownloadReady(false);
     pageStates.clear();
     undoStack.length = 0;
     redoStack.length = 0;
@@ -1721,14 +1779,20 @@ window.crystalUI = {
   setDeskewAngle(page, angle) {
     applyDeskewAngle(page, angle);
   },
-  setProcessing(active) {
+  setProcessing(active, label='Идёт очистка') {
+    processingActive = !!active;
     const btn = document.getElementById('megaBtn');
     const cancel = document.querySelector('.cancel-btn');
     if (btn) {
-      btn.disabled = !!active;
-      btn.innerHTML = active ? '⏳&nbsp;&nbsp;Идёт очистка' : '▶&nbsp;&nbsp;Запустить очистку';
+      btn.disabled = processingActive;
+      btn.innerHTML = processingActive ? `⏳&nbsp;&nbsp;${label}` : '▶&nbsp;&nbsp;Запустить очистку';
     }
-    if (cancel) cancel.disabled = !active;
+    if (cancel) cancel.disabled = !processingActive;
+    applyActionLocks();
+  },
+  setDownloadReady(ready) {
+    downloadReady = !!ready;
+    applyActionLocks();
   },
   addLog(text) {
     this.setStatus(text, 'info');
@@ -1751,12 +1815,14 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
   new QWebChannel(qt.webChannelTransport, channel => {
     const bridge = channel.objects.bridge;
     window.crystalUI.bridge = bridge;
+    window.crystalUI.setDownloadReady(false);
     syncAllPageEdits();
 
     document.querySelectorAll('.btn').forEach(btn => {
       const text = btn.textContent.replace(/\s+/g, ' ').trim();
       if (text.includes('Импорт PDF')) btn.addEventListener('click', () => bridge.importPdf());
       else if (text.includes('Экспорт PDF')) btn.addEventListener('click', () => {
+        if (btn.disabled) return;
         syncAllPageEdits();
         bridge.exportPdf();
       });
@@ -1765,6 +1831,7 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
       else if (text.includes('Не чистить')) btn.addEventListener('click', () => setPageSkip());
       else if (text.includes('Снять защиту')) btn.addEventListener('click', removeProtectOverlays);
       else if (text.includes('Скачать текущую')) btn.addEventListener('click', () => {
+        if (btn.disabled) return;
         syncPageEdits();
         bridge.exportCurrentPage();
       });
@@ -1781,6 +1848,7 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
 
     const mega = document.getElementById('megaBtn');
     if (mega) mega.addEventListener('click', () => {
+      if (mega.disabled || processingActive) return;
       syncAllPageEdits();
       bridge.startCleaning();
     });
