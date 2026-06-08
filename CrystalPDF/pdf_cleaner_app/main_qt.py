@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,10 @@ APP_TITLE = f"{APP_NAME} {APP_VERSION}"
 DEFAULT_DPI = 300
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 DESKTOP_SHORTCUT_NAME = APP_TITLE
+CLEAN_PROGRESS_RE = re.compile(
+    r"Стр\.\s*(\d+)\s*/\s*\d+\s*·\s*(.+)",
+    re.IGNORECASE,
+)
 LEGACY_DESKTOP_SHORTCUT_NAMES = ("CrystalPDF", "Mini_Icon_CrystalPDF")
 DESKTOP_SHORTCUT_NEVER_ASK_SETTING = "desktop_shortcut_never_ask"
 LEGACY_DESKTOP_SHORTCUT_PROMPT_DISABLED_SETTING = "desktop_shortcut_prompt_disabled"
@@ -122,11 +127,14 @@ class UiOptions:
     deskew: bool = True
     skip_first: bool = True
     skip_last: bool = False
+    clean_ranges: str = ""
+    clean_from: int = 1
+    clean_to: int = 0
     keep_color: bool = True
     split_pages: bool = False
     compress_pdf: bool = False
-    compression_level: str = "Среднее"
-    compression_scope: str = "Все страницы"
+    compression_level: str = "medium"
+    compression_scope: str = "all"
     mode: str = "standard"
 
     def clean_settings(self, clean_edges: bool) -> CleanSettings:
@@ -150,11 +158,30 @@ class UiOptions:
         if not self.compress_pdf:
             return 92
         text = self.compression_level.casefold()
-        if "силь" in text:
+        if text in {"strong", "high", "max"}:
             return 62
-        if "лёг" in text or "лег" in text:
+        if text in {"light", "low"}:
             return 88
         return 78
+
+    def compression_scope_kind(self) -> str:
+        scope = self.compression_scope.casefold()
+        if scope in {"color", "colour", "colored"}:
+            return "color"
+        if scope in {"processed", "cleaned"}:
+            return "processed"
+        return "all"
+
+    def should_compress_page(self, *, color: bool, processed: bool) -> bool:
+        if not self.compress_pdf:
+            return False
+
+        scope = self.compression_scope_kind()
+        if scope == "color":
+            return bool(color)
+        if scope == "processed":
+            return bool(processed)
+        return True
 
 
 def render_page_rgb(page: fitz.Page, dpi: int) -> Image.Image:
@@ -164,12 +191,32 @@ def render_page_rgb(page: fitz.Page, dpi: int) -> Image.Image:
 
 
 def adjust_pil_image(image: Image.Image, brightness: int, contrast: int) -> Image.Image:
-    result = image
+    original = image.convert("RGB") if image.mode != "RGB" else image
+    result = original
     if brightness:
         result = ImageEnhance.Brightness(result).enhance(max(0.1, 1.0 + float(brightness) / 100.0))
     if contrast != 100:
         result = ImageEnhance.Contrast(result).enhance(max(0.1, float(contrast) / 100.0))
+
+    if result.mode == "RGB" and (brightness or contrast != 100):
+        mask = color_text_mask(original)
+        if mask.any():
+            adjusted = np.array(result, dtype=np.uint8)
+            adjusted[mask] = np.asarray(original, dtype=np.uint8)[mask]
+            result = Image.fromarray(adjusted)
     return result
+
+
+def color_text_mask(image: Image.Image) -> np.ndarray:
+    arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    arr_i = arr.astype(np.int16)
+    channel_delta = arr_i.max(axis=2) - arr_i.min(axis=2)
+    not_white = arr_i.min(axis=2) < 245
+    saturated = (channel_delta > 18) & not_white
+    if not saturated.any():
+        return saturated
+    kernel = np.ones((2, 2), np.uint8)
+    return cv2.dilate(saturated.astype(np.uint8), kernel, iterations=1).astype(bool)
 
 
 def pil_image_has_color(image: Image.Image, max_pixels: int = 180_000) -> bool:
@@ -179,8 +226,10 @@ def pil_image_has_color(image: Image.Image, max_pixels: int = 180_000) -> bool:
     if pixels.shape[0] > max_pixels:
         step = max(1, pixels.shape[0] // max_pixels)
         pixels = pixels[::step]
-    diffs = pixels.max(axis=1).astype(np.int16) - pixels.min(axis=1).astype(np.int16)
-    return bool(np.mean(diffs > 18) > 0.015)
+    pixels_i = pixels.astype(np.int16)
+    diffs = pixels_i.max(axis=1) - pixels_i.min(axis=1)
+    colored = (diffs > 18) & (pixels_i.min(axis=1) < 245)
+    return bool(np.mean(colored) > 0.003 or np.count_nonzero(colored) > 600)
 
 
 def image_stream(image: Image.Image, quality: int, prefer_jpeg: bool) -> tuple[bytes, str]:
@@ -214,7 +263,7 @@ def document_preview_payload(doc: fitz.Document, preview_page: int = 1) -> tuple
     preview_index = max(0, min(int(preview_page or 1) - 1, total - 1))
     preview = page_png_data_url(doc.load_page(preview_index), 980, 1320)
     thumbs: list[dict[str, object]] = []
-    for idx in range(min(total, 24)):
+    for idx in range(total):
         page = doc.load_page(idx)
         thumbs.append(
             {
@@ -223,6 +272,62 @@ def document_preview_payload(doc: fitz.Document, preview_page: int = 1) -> tuple
             }
         )
     return preview, thumbs
+
+
+def parse_clean_page_ranges(text: str, total: int) -> set[int] | None:
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    selected: set[int] = set()
+    normalized = text.replace("–", "-").replace("—", "-").replace(";", ",")
+    for raw_part in normalized.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+
+        if "-" in part:
+            bounds = [item.strip() for item in part.split("-")]
+            if len(bounds) != 2 or not bounds[0] or not bounds[1]:
+                raise ValueError(f"Некорректный диапазон страниц: {part}")
+            try:
+                start, end = int(bounds[0]), int(bounds[1])
+            except ValueError as exc:
+                raise ValueError(f"Некорректный диапазон страниц: {part}") from exc
+            if start > end:
+                start, end = end, start
+        else:
+            try:
+                start = end = int(part)
+            except ValueError as exc:
+                raise ValueError(f"Некорректный номер страницы: {part}") from exc
+
+        if start < 1:
+            start = 1
+        if end > total:
+            end = total
+        if start <= end:
+            selected.update(range(start, end + 1))
+
+    if not selected:
+        raise ValueError("Диапазон очистки не содержит страниц документа.")
+    return selected
+
+
+def page_status_from_progress_text(text: str) -> tuple[int, str] | None:
+    match = CLEAN_PROGRESS_RE.search(text or "")
+    if not match:
+        return None
+
+    page = int(match.group(1))
+    stage = match.group(2).casefold()
+    if "готово" in stage:
+        return page, "ok"
+    if "без очистки" in stage or "вне диапазона" in stage:
+        return page, "skip"
+    if "ошиб" in stage:
+        return page, "error"
+    return page, "work"
 
 
 def estimate_color_pages_document(doc: fitz.Document) -> int:
@@ -349,6 +454,35 @@ def pct_box_to_px(box: dict[str, object], width: int, height: int) -> tuple[int,
     return x0, y0, x1, y1
 
 
+def pil_image_has_color_outside_boxes(
+    image: Image.Image,
+    boxes: list[dict[str, object]],
+    max_pixels: int = 180_000,
+) -> bool:
+    if not boxes:
+        return pil_image_has_color(image, max_pixels=max_pixels)
+
+    rgb = image.convert("RGB")
+    arr = np.asarray(rgb)
+    height, width = arr.shape[:2]
+    mask = np.ones((height, width), dtype=bool)
+    for box in boxes:
+        x0, y0, x1, y1 = pct_box_to_px(box, width, height)
+        mask[y0:y1, x0:x1] = False
+
+    pixels = arr[mask].reshape(-1, 3)
+    if pixels.shape[0] == 0:
+        return False
+    if pixels.shape[0] > max_pixels:
+        step = max(1, pixels.shape[0] // max_pixels)
+        pixels = pixels[::step]
+
+    pixels_i = pixels.astype(np.int16)
+    diffs = pixels_i.max(axis=1) - pixels_i.min(axis=1)
+    colored = (diffs > 18) & (pixels_i.min(axis=1) < 245)
+    return bool(np.mean(colored) > 0.003 or np.count_nonzero(colored) > 600)
+
+
 def edited_target_rect(page_rect: fitz.Rect, page_edits: dict[str, object] | None) -> fitz.Rect:
     crop = latest_crop_box(page_edits)
     if not crop:
@@ -410,10 +544,19 @@ def apply_page_edits(
     return result
 
 
-def insert_pil_page(target: fitz.Document, rect: fitz.Rect, image: Image.Image, options: UiOptions, color: bool) -> None:
+def insert_pil_page(
+    target: fitz.Document,
+    rect: fitz.Rect,
+    image: Image.Image,
+    options: UiOptions,
+    color: bool,
+    compress: bool | None = None,
+) -> None:
     page = target.new_page(width=rect.width, height=rect.height)
-    use_jpeg = color or options.compress_pdf
-    stream, _fmt = image_stream(image, options.jpeg_quality(), use_jpeg)
+    compress_image = options.compress_pdf if compress is None else bool(compress)
+    use_jpeg = color or compress_image
+    quality = options.jpeg_quality() if compress_image else 92
+    stream, _fmt = image_stream(image, quality, use_jpeg)
     page.insert_image(page.rect, stream=stream)
 
 
@@ -436,6 +579,16 @@ def clean_pdf_webengine(
     processed_count = 0
     try:
         total = len(source)
+        clean_pages = parse_clean_page_ranges(options.clean_ranges, total)
+        if clean_pages is None:
+            clean_from = max(1, int(options.clean_from or 1))
+            clean_to = int(options.clean_to or 0)
+            if clean_to <= 0:
+                clean_to = total
+            clean_from = min(clean_from, max(1, total))
+            clean_to = min(max(clean_to, clean_from), max(1, total))
+        else:
+            clean_from = clean_to = 0
         for idx in range(total):
             if cancel_requested():
                 raise RuntimeError("Обработка отменена")
@@ -446,29 +599,68 @@ def clean_pdf_webengine(
 
             page = source.load_page(idx)
             edits = page_edits.get(page_num, {}) if page_edits else {}
-            skip = bool(edits.get("skip")) or (idx == 0 and options.skip_first) or (idx == total - 1 and options.skip_last)
+            in_clean_range = page_num in clean_pages if clean_pages is not None else clean_from <= page_num <= clean_to
+            skip = (
+                not in_clean_range
+                or bool(edits.get("skip"))
+                or (clean_pages is None and idx == 0 and options.skip_first)
+                or (clean_pages is None and idx == total - 1 and options.skip_last)
+            )
             has_page_edits = has_page_visual_edits(edits)
+            protected_boxes = page_edit_overlays(edits, "protect")
             if skip and not has_page_edits:
+                if options.compress_pdf and options.compression_scope_kind() in {"all", "color"}:
+                    rgb = render_page_rgb(page, DEFAULT_DPI)
+                    is_color = pil_image_has_color(rgb)
+                    if options.should_compress_page(color=is_color, processed=False):
+                        insert_pil_page(
+                            target,
+                            image_page_rect(rgb),
+                            rgb,
+                            options,
+                            color=is_color,
+                            compress=True,
+                        )
+                        processed_count += 1
+                        progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · сжатие")
+                        progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
+                        continue
                 target.insert_pdf(source, from_page=idx, to_page=idx)
-                progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · без очистки")
+                reason = "вне диапазона" if not in_clean_range else "без очистки"
+                progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · {reason}")
                 continue
 
             rgb = render_page_rgb(page, DEFAULT_DPI)
             if skip:
                 progress(pct, f"Стр. {page_num}/{total} · правки без очистки")
                 out_img = apply_page_edits(rgb, rgb, edits)
-                insert_pil_page(target, image_page_rect(out_img), out_img, options, color=True)
+                is_color = pil_image_has_color(out_img)
+                insert_pil_page(
+                    target,
+                    image_page_rect(out_img),
+                    out_img,
+                    options,
+                    color=is_color,
+                    compress=options.should_compress_page(color=is_color, processed=False),
+                )
                 processed_count += 1
                 progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
                 continue
 
-            is_color = options.keep_color and pil_image_has_color(rgb)
+            is_color = options.keep_color and pil_image_has_color_outside_boxes(rgb, protected_boxes)
             if is_color:
                 color_count += 1
                 progress(pct, f"Стр. {page_num}/{total} · сохранение цвета")
                 out_img = adjust_pil_image(rgb, options.brightness, options.contrast)
                 out_img = apply_page_edits(out_img, rgb, edits)
-                insert_pil_page(target, image_page_rect(out_img), out_img, options, color=True)
+                insert_pil_page(
+                    target,
+                    image_page_rect(out_img),
+                    out_img,
+                    options,
+                    color=True,
+                    compress=options.should_compress_page(color=True, processed=True),
+                )
             else:
                 progress(pct, f"Стр. {page_num}/{total} · шумоподавление")
                 gray = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2GRAY)
@@ -485,6 +677,7 @@ def clean_pdf_webengine(
                     out_img,
                     options,
                     color=out_img.mode == "RGB",
+                    compress=options.should_compress_page(color=out_img.mode == "RGB", processed=True),
                 )
             processed_count += 1
             progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
@@ -688,7 +881,7 @@ class Bridge(QObject):
 
     @Slot(str)
     def setOutputPath(self, path: str):
-        self.window.output_path = Path(path).expanduser() if path else None
+        self.window.set_output_path(path)
 
     @Slot(str, str)
     def setOption(self, name: str, value: str):
@@ -756,10 +949,23 @@ class CrystalPdfQtApp(QMainWindow):
     def refresh_download_state(self) -> None:
         self.ui_call("setDownloadReady", self.has_processed_output())
 
+    def handle_clean_progress(self, pct: int, text: str) -> None:
+        self.ui_call("setProgress", pct, text)
+        page_status = page_status_from_progress_text(text)
+        if page_status:
+            page, status = page_status
+            self.ui_call("setPageStatus", page, status)
+
     def mark_result_stale(self) -> None:
         if self.last_output_path is not None:
             self.last_output_path = None
             self.refresh_download_state()
+
+    def set_output_path(self, path: str) -> None:
+        if self.is_busy():
+            return
+        self.output_path = Path(path).expanduser() if path else None
+        self.mark_result_stale()
 
     def on_ui_ready(self) -> None:
         self.ui_call("setProgress", 0, "Готов · откройте PDF")
@@ -965,6 +1171,8 @@ class CrystalPdfQtApp(QMainWindow):
             "contrast",
             "edge_margin",
             "edge_threshold",
+            "clean_from",
+            "clean_to",
         }
         bool_names = {
             "edge_clean",
@@ -977,12 +1185,26 @@ class CrystalPdfQtApp(QMainWindow):
         }
         if name in int_names:
             try:
-                setattr(self.options, name, int(float(value)))
+                text = str(value or "").strip()
+                if not text and name == "clean_to":
+                    parsed = 0
+                elif not text and name == "clean_from":
+                    parsed = 1
+                else:
+                    parsed = int(float(text))
+                if name == "clean_from":
+                    parsed = max(1, parsed)
+                elif name == "clean_to":
+                    parsed = max(0, parsed)
+                setattr(self.options, name, parsed)
                 self.mark_result_stale()
             except ValueError:
                 pass
         elif name in bool_names:
             setattr(self.options, name, bool_value)
+            self.mark_result_stale()
+        elif name == "clean_ranges":
+            self.options.clean_ranges = value.strip()
             self.mark_result_stale()
         elif name in {"compression_level", "compression_scope"}:
             setattr(self.options, name, value)
@@ -1152,23 +1374,36 @@ class CrystalPdfQtApp(QMainWindow):
     def export_pdf(self) -> None:
         if self.is_busy():
             return
-        if not self.has_processed_output():
-            self.refresh_download_state()
-            QMessageBox.information(self, APP_TITLE, "Сначала запустите очистку и дождитесь завершения обработки.")
+        if not self.input_path and not self.has_processed_output():
+            QMessageBox.information(self, APP_TITLE, "Сначала импортируйте PDF.")
             return
 
+        default_target = self.last_output_path or self.output_path or default_output_path(self.input_path or Path("scan.pdf"))
         target, _ = QFileDialog.getSaveFileName(
             self,
             "Сохранить PDF",
-            str(self.last_output_path),
+            str(default_target),
             "PDF (*.pdf)",
         )
-        if target:
-            output = Path(target)
-            if output.suffix.lower() != ".pdf":
-                output = output.with_suffix(".pdf")
-            shutil.copyfile(self.last_output_path, output)
+        if not target:
+            return
+
+        output = Path(target)
+        if output.suffix.lower() != ".pdf":
+            output = output.with_suffix(".pdf")
+
+        if self.has_processed_output():
+            try:
+                if self.last_output_path.resolve() != output.resolve():
+                    shutil.copyfile(self.last_output_path, output)
+            except Exception as exc:
+                QMessageBox.critical(self, APP_TITLE, f"Не удалось экспортировать PDF: {exc}")
+                return
             self.ui_call("setProgress", 100, f"Экспорт готов: {output.name}")
+            self.ui_call("setStatus", "● Экспорт готов", "ready")
+            return
+
+        self.start_cleaning(output_override=output, uniquify_output=False)
 
     def export_current_page(self) -> None:
         if self.is_busy():
@@ -1305,38 +1540,104 @@ class CrystalPdfQtApp(QMainWindow):
         self.load_pdf(output, page_number)
         self.ui_call("setProgress", 100, f"Поворот страницы: {degrees:+d}°")
 
-    def start_cleaning(self, export_after: bool = False) -> None:
+    def start_cleaning(
+        self,
+        export_after: bool = False,
+        output_override: Path | None = None,
+        uniquify_output: bool = True,
+    ) -> None:
         if self.is_busy():
             return
         if not self.input_path:
             QMessageBox.information(self, APP_TITLE, "Сначала импортируйте PDF.")
             return
-        output = self.output_path or default_output_path(self.input_path)
+        output = output_override or self.output_path or default_output_path(self.input_path)
         if output.suffix.lower() != ".pdf":
             output = output.with_suffix(".pdf")
-        output = unique_output_path(output)
+        if self.input_path and output.resolve() == self.input_path.resolve():
+            output = output.with_name(f"{output.stem}_clean.pdf")
+            uniquify_output = True
+        if uniquify_output:
+            output = unique_output_path(output)
         self.output_path = output
         self.last_output_path = None
         self.ui_call("setOutput", str(output))
         self.refresh_download_state()
+        self.ui_call("resetPageStatuses")
         self.ui_call("setProcessing", True, "Идёт очистка")
         self.ui_call("setProgress", 0, "Запуск обработки…")
         self.ui_call("setStatus", "◉ Обработка", "working")
 
         worker = CleanWorker(self.input_path, output, copy.deepcopy(self.options), copy.deepcopy(self.page_edits))
         self.worker = worker
-        worker.progress_changed.connect(lambda pct, text: self.ui_call("setProgress", pct, text))
+        worker.progress_changed.connect(self.handle_clean_progress)
         worker.finished_ok.connect(self.on_clean_finished)
         worker.failed.connect(self.on_worker_failed)
         worker.start()
 
     def on_clean_finished(self, output: str, colors: int, processed: int) -> None:
         self.worker = None
-        self.last_output_path = Path(output)
+        result_path = Path(output)
+        self.last_output_path = result_path
+        self.output_path = result_path
+        self.ui_call("setProgress", 100, f"Готово → {result_path.name}")
+        self.ui_call("setStats", self.page_count, max(self.color_count, colors), processed, 0)
+        self.ui_call("setAllPageStatuses", "ok")
+        self.ui_call("setProcessing", True, "Открытие результата")
+        self.ui_call("setStatus", "◉ Открытие результата", "working")
+
+        worker = PdfLoadWorker(result_path, self.current_page, True)
+        self.worker = worker
+        worker.finished_ok.connect(
+            lambda path, page_count, color_count, preview, thumbs, page_number, reset_edits: self.on_processed_pdf_loaded(
+                path,
+                page_count,
+                color_count,
+                preview,
+                thumbs,
+                page_number,
+                reset_edits,
+                result_path,
+                colors,
+                processed,
+            )
+        )
+        worker.failed.connect(self.on_worker_failed)
+        worker.start()
+
+    def on_processed_pdf_loaded(
+        self,
+        path: str,
+        page_count: int,
+        color_count: int,
+        preview: str,
+        thumbs: object,
+        page_number: int,
+        reset_edits: bool,
+        result_path: Path,
+        colors: int,
+        processed: int,
+    ) -> None:
+        self.worker = None
+        path_obj = Path(path)
+        self.input_path = path_obj
+        self.page_count = page_count
+        self.color_count = color_count
+        self.output_path = result_path
+        self.last_output_path = result_path
+        self.current_page = page_number
+        if reset_edits:
+            self.page_edits = {}
+
+        thumb_payload = thumbs if isinstance(thumbs, list) else []
+        self.ui_call("setFile", path_obj.name)
+        self.ui_call("setOutput", str(result_path))
+        self.ui_call("setDocument", path_obj.name, self.page_count, self.color_count, preview, thumb_payload, self.current_page)
+        self.ui_call("setStats", self.page_count, max(self.color_count, colors), processed, 0)
+        self.ui_call("setAllPageStatuses", "ok")
+        self.ui_call("setProgress", 100, f"Готово → {result_path.name}")
         self.ui_call("setProcessing", False)
         self.refresh_download_state()
-        self.ui_call("setProgress", 100, f"Готово → {self.last_output_path.name}")
-        self.ui_call("setStats", self.page_count, max(self.color_count, colors), processed, 0)
         self.ui_call("setStatus", "✓ Готово", "ready")
 
     def on_worker_failed(self, message: str) -> None:

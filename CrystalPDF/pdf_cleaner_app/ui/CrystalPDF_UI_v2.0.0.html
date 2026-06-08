@@ -240,6 +240,13 @@ body::after{
 }
 .sb-input:focus{border-color:rgba(0,229,255,.42);box-shadow:0 0 0 3px rgba(0,229,255,.06)}
 .sb-input::placeholder{color:var(--t3)}
+.range-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:6px 0 4px}
+.range-row.single{grid-template-columns:1fr}
+.range-box{display:flex;align-items:center;gap:6px;background:rgba(255,255,255,.018);border:1px solid var(--bd);border-radius:var(--rx);padding:6px 8px}
+.range-box span{font-size:10px;color:var(--t2);font-family:var(--mono);text-transform:uppercase}
+.range-input{width:100%;background:transparent;border:0;outline:0;color:var(--t0);font-family:var(--mono);font-size:12px}
+.range-input::placeholder{color:var(--t3)}
+.range-input::-webkit-outer-spin-button,.range-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 
 /* ── Select ── */
 .sb-select{
@@ -252,6 +259,14 @@ body::after{
   margin-bottom:9px;transition:border-color .15s;
 }
 .sb-select:focus{border-color:rgba(0,229,255,.42)}
+.sb-select option{
+  background:#fff;
+  color:#111827;
+}
+.sb-select option:checked{
+  background:#2563eb;
+  color:#fff;
+}
 
 /* ── Toggle ── */
 .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0}
@@ -268,6 +283,16 @@ body::after{
 .sl-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
 .sl-name{font-size:11px;color:var(--t1)}
 .sl-val{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--c0);min-width:30px;text-align:right}
+.sl-actions{display:flex;align-items:center;gap:6px;margin-left:10px}
+.sl-reset{
+  width:20px;height:20px;border-radius:7px;
+  border:1px solid rgba(0,229,255,.22);
+  background:rgba(0,229,255,.055);color:var(--c0);
+  font-family:var(--mono);font-size:12px;line-height:1;
+  cursor:pointer;transition:background .15s,border-color .15s,transform .15s;
+}
+.sl-reset:hover{background:rgba(0,229,255,.12);border-color:rgba(0,229,255,.42);transform:translateY(-1px)}
+.sl-reset:disabled{opacity:.45;cursor:not-allowed;transform:none}
 input[type=range]{
   -webkit-appearance:none;width:100%;height:3px;border-radius:2px;
   background:var(--t3);outline:none;cursor:pointer;
@@ -414,7 +439,19 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 }
 .page-edit-layer{position:absolute;inset:0;z-index:4;pointer-events:none}
 .tool-overlay{position:absolute;pointer-events:none;z-index:2}
-.overlay-eraser{border-radius:50%;background:rgba(255,255,255,.9);border:1px solid rgba(0,229,255,.26);box-shadow:0 0 12px rgba(0,229,255,.12)}
+.overlay-eraser{
+  border-radius:50%;background:rgba(255,255,255,.96);
+  border:1px dashed rgba(17,24,39,.42);
+  box-shadow:0 0 0 1px rgba(255,190,61,.16),0 2px 8px rgba(0,0,0,.10);
+}
+.eraser-cursor{
+  position:absolute;pointer-events:none;z-index:9;border-radius:50%;
+  background:rgba(255,255,255,.18);
+  border:2px solid rgba(17,24,39,.72);
+  outline:2px solid rgba(255,190,61,.45);
+  box-shadow:0 0 0 1px rgba(255,255,255,.42),0 0 18px rgba(255,190,61,.18);
+  transform:translate(-50%,-50%);
+}
 .overlay-crop{z-index:7;border:1px solid rgba(255,190,61,.9);background:rgba(255,190,61,.10);box-shadow:0 0 18px rgba(255,190,61,.14),inset 0 0 0 1px rgba(255,255,255,.16)}
 .overlay-protect{z-index:5;border:1px solid rgba(0,229,255,.88);background:rgba(0,229,255,.10);box-shadow:0 0 18px rgba(0,229,255,.16),inset 0 0 0 1px rgba(255,255,255,.14)}
 .overlay-draft{border-style:dashed;background:rgba(157,123,255,.08)}
@@ -435,7 +472,21 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .pl.s{width:36%}.pl.m{width:68%}
 
 /* Edge zones */
-.ez-t,.ez-b,.ez-l,.ez-r{position:absolute;background:rgba(255,190,61,.1);border:1px dashed rgba(255,190,61,.38);pointer-events:none}
+.edge-zone-overlay{position:absolute;inset:0;pointer-events:none;z-index:3}
+.edge-zone-band{
+  position:absolute;pointer-events:none;
+  background:rgba(255,190,61,.26);
+  border:1px dashed rgba(255,190,61,.62);
+  box-shadow:0 0 14px rgba(255,190,61,.14),inset 0 0 0 1px rgba(255,255,255,.12);
+}
+.edge-zone-label{
+  position:absolute;top:6px;left:22px;z-index:1;
+  padding:2px 5px;border-radius:999px;
+  background:rgba(255,190,61,.18);border:1px solid rgba(255,190,61,.32);
+  font-size:9px;font-weight:700;color:rgba(124,78,0,.86);
+  font-family:var(--mono);letter-spacing:.8px;pointer-events:none;
+}
+.ez-t,.ez-b,.ez-l,.ez-r{position:absolute;background:rgba(255,190,61,.16);border:1px dashed rgba(255,190,61,.52);pointer-events:none}
 .ez-t{top:0;left:0;right:0;height:28px}
 .ez-b{bottom:0;left:0;right:0;height:28px}
 .ez-l{top:0;bottom:0;left:0;width:18px}
@@ -453,7 +504,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 
 /* Scan line */
 .scan-line{
-  position:absolute;left:0;right:0;height:1px;
+  display:none;position:absolute;left:0;right:0;height:1px;
   background:linear-gradient(90deg,transparent,rgba(0,229,255,.52) 30%,rgba(0,229,255,.82) 50%,rgba(0,229,255,.52) 70%,transparent);
   pointer-events:none;animation:scan-sweep 4.5s linear infinite;z-index:5;
 }
@@ -640,6 +691,11 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <label class="toggle-wrap"><input type="checkbox" checked><span class="t-track"></span><span class="t-thumb"></span></label>
           </div>
           <div class="info-lbl">🎨 4 цветных стр. будут сохранены без конвертации</div>
+          <div class="field-lbl" style="margin-top:10px">Диапазон очистки</div>
+          <div class="range-row single">
+            <label class="range-box"><span>стр.</span><input class="range-input" data-option="clean_ranges" type="text" placeholder="например: 1-7, 25-50"></label>
+          </div>
+          <div class="info-lbl">Пустое поле означает очистку всех страниц. Можно указать: 1-7, 25-50, 80.</div>
         </div>
       </div>
     </div>
@@ -655,27 +711,27 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Размер точки (px)</span><span class="sl-val" id="sv1">25</span></div>
-            <input type="range" min="1" max="100" value="25" oninput="document.getElementById('sv1').textContent=this.value;updateTrack(this)">
+            <input type="range" min="1" max="100" value="25" data-option="dot_area" data-default="25" oninput="document.getElementById('sv1').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Шумоподавление (NL-Means)</span><span class="sl-val" id="sv2">12</span></div>
-            <input type="range" min="1" max="50" value="12" oninput="document.getElementById('sv2').textContent=this.value;updateTrack(this)">
+            <input type="range" min="1" max="50" value="12" data-option="denoise" data-default="12" oninput="document.getElementById('sv2').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Яркость</span><span class="sl-val" id="sv3">0</span></div>
-            <input type="range" min="-80" max="80" value="0" oninput="document.getElementById('sv3').textContent=this.value;updateTrack(this)">
+            <input type="range" min="-80" max="80" value="0" data-option="brightness" data-default="0" oninput="document.getElementById('sv3').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Контраст (%)</span><span class="sl-val" id="sv4">100</span></div>
-            <input type="range" min="50" max="200" value="100" oninput="document.getElementById('sv4').textContent=this.value;updateTrack(this)">
+            <input type="range" min="50" max="200" value="100" data-option="contrast" data-default="100" oninput="document.getElementById('sv4').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Зона краёв (px)</span><span class="sl-val" id="sv5">5</span></div>
-            <input type="range" min="5" max="150" value="5" oninput="document.getElementById('sv5').textContent=this.value;updateTrack(this)">
+            <input type="range" min="5" max="150" value="5" data-option="edge_margin" data-default="5" oninput="document.getElementById('sv5').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Порог тёмной линии</span><span class="sl-val" id="sv6">60</span></div>
-            <input type="range" min="20" max="200" value="60" oninput="document.getElementById('sv6').textContent=this.value;updateTrack(this)">
+            <input type="range" min="20" max="200" value="60" data-option="edge_threshold" data-default="60" oninput="document.getElementById('sv6').textContent=this.value;updateTrack(this)">
           </div>
         </div>
       </div>
@@ -697,6 +753,11 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
           <button class="btn btn-ghost">□&nbsp; Снять защиту области</button>
           <button class="btn btn-g">↓&nbsp; Скачать текущую</button>
           <button class="btn btn-r">−&nbsp; Удалить текущую</button>
+          <div class="sep"></div>
+          <div class="sl-row">
+            <div class="sl-head"><span class="sl-name">Размер ластика</span><span class="sl-val" id="sv-eraser">7</span></div>
+            <input type="range" min="1" max="30" value="7" data-local="eraser_size" data-default="7" oninput="document.getElementById('sv-eraser').textContent=this.value;updateTrack(this)">
+          </div>
         </div>
       </div>
     </div>
@@ -719,9 +780,9 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <label class="toggle-wrap"><input type="checkbox"><span class="t-track"></span><span class="t-thumb"></span></label>
           </div>
           <div class="field-lbl">Уровень сжатия</div>
-          <select class="sb-select"><option>Лёгкое</option><option selected>Среднее</option><option>Сильное</option></select>
+          <select class="sb-select"><option value="light">Лёгкое</option><option value="medium" selected>Среднее</option><option value="strong">Сильное</option></select>
           <div class="field-lbl">Применять к</div>
-          <select class="sb-select"><option selected>Все страницы</option><option>Только цветные</option><option>Только очищаемые</option></select>
+          <select class="sb-select"><option value="all" selected>Все страницы</option><option value="color">Только цветные</option><option value="processed">Только очищаемые</option></select>
         </div>
       </div>
     </div>
@@ -898,6 +959,9 @@ let pct = 68;
 const fill = document.getElementById('prog-fill');
 const pctLbl = document.getElementById('pct-lbl');
 const statusLbl = document.getElementById('prog-status');
+const EDGE_CLEAN_TOGGLE_INDEX = 0;
+const EDGE_MARGIN_OPTION = 'edge_margin';
+const ERASER_SIZE_LOCAL = 'eraser_size';
 const statuses = ['Стр. 15/22 · шумоподавление…','Стр. 16/22 · дескью…','Стр. 16/22 · удаление точек…','Стр. 17/22 · очистка краёв…'];
 let si = 0;
 fill.style.width = pct + '%';
@@ -945,6 +1009,9 @@ document.querySelectorAll('.toggle-wrap').forEach(w => {
     inp.checked = !inp.checked;
     inp.dispatchEvent(new Event('change', { bubbles: true }));
   });
+});
+document.querySelectorAll('.toggle-row input').forEach((input, index) => {
+  if (index === EDGE_CLEAN_TOGGLE_INDEX) input.addEventListener('change', renderOverlays);
 });
 
 /* ─── Toolbar tools ─── */
@@ -997,11 +1064,68 @@ function updateTrack(r) {
   const pct = ((r.value - r.min) / (r.max - r.min)) * 100;
   r.style.background = `linear-gradient(90deg,rgba(0,229,255,.35) ${pct}%,var(--t3) ${pct}%)`;
 }
+
+function rangeByOption(name) {
+  return Array.from(document.querySelectorAll('input[type=range][data-option]')).find(r => r.dataset.option === name) || null;
+}
+
+function rangeByLocal(name) {
+  return Array.from(document.querySelectorAll('input[type=range][data-local]')).find(r => r.dataset.local === name) || null;
+}
+
+function syncSliderValue(r) {
+  const value = r.closest('.sl-row')?.querySelector('.sl-val');
+  if (value) value.textContent = String(r.value);
+}
+
+function refreshSliderEffects(r) {
+  updateTrack(r);
+  syncSliderValue(r);
+  applyPreviewFilters();
+  if (r.dataset.option === EDGE_MARGIN_OPTION || r.dataset.local === ERASER_SIZE_LOCAL) renderOverlays();
+}
+
+function resetSlider(r) {
+  r.value = r.dataset.default || r.defaultValue || r.getAttribute('value') || r.min || '0';
+  r.dispatchEvent(new Event('input', { bubbles: true }));
+  r.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function enhanceSliderResets() {
+  document.querySelectorAll('.sl-row').forEach(row => {
+    const range = row.querySelector('input[type=range]');
+    const value = row.querySelector('.sl-val');
+    const head = row.querySelector('.sl-head');
+    if (!range || !value || !head || row.querySelector('.sl-reset')) return;
+    if (!range.dataset.default) range.dataset.default = range.getAttribute('value') || range.value;
+
+    let actions = row.querySelector('.sl-actions');
+    if (!actions) {
+      actions = document.createElement('div');
+      actions.className = 'sl-actions';
+      head.appendChild(actions);
+    }
+    actions.appendChild(value);
+
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'sl-reset';
+    reset.title = 'Сбросить к исходному значению';
+    reset.textContent = '↺';
+    reset.addEventListener('click', event => {
+      event.preventDefault();
+      resetSlider(range);
+    });
+    actions.appendChild(reset);
+  });
+}
+
+enhanceSliderResets();
 document.querySelectorAll('input[type=range]').forEach(r => {
   updateTrack(r);
+  syncSliderValue(r);
   r.addEventListener('input', () => {
-    updateTrack(r);
-    applyPreviewFilters();
+    refreshSliderEffects(r);
   });
 });
 
@@ -1009,6 +1133,8 @@ let currentDocument = { name: '', pages: 0, color: 0, page: 1, edits: 0, zoom: 1
 let currentTool = 'pan';
 let processingActive = false;
 let downloadReady = false;
+let pageStateFrame = 0;
+let lastEraserPoint = null;
 const pageStates = new Map();
 const undoStack = [];
 const redoStack = [];
@@ -1018,32 +1144,47 @@ function buttonTextHas(btn, values) {
   return values.some(value => text.includes(value));
 }
 
-function downloadButtons() {
+function exportButtons() {
   return Array.from(document.querySelectorAll('.btn')).filter(btn =>
-    buttonTextHas(btn, ['Экспорт PDF', 'Скачать текущую'])
+    buttonTextHas(btn, ['Экспорт PDF'])
+  );
+}
+
+function currentPageDownloadButtons() {
+  return Array.from(document.querySelectorAll('.btn')).filter(btn =>
+    buttonTextHas(btn, ['Скачать текущую'])
   );
 }
 
 function applyActionLocks() {
-  const canDownload = downloadReady && !processingActive;
-  const downloads = new Set(downloadButtons());
+  const canExport = currentDocument.pages > 0 && !processingActive;
+  const canDownloadCurrent = downloadReady && !processingActive;
+  const exports = new Set(exportButtons());
+  const currentDownloads = new Set(currentPageDownloadButtons());
+  const lockedActions = new Set([...exports, ...currentDownloads]);
   document.body.classList.toggle('is-processing', processingActive);
 
   Array.from(document.querySelectorAll('.btn')).forEach(btn => {
-    if (btn.id === 'megaBtn' || downloads.has(btn)) return;
+    if (btn.id === 'megaBtn' || lockedActions.has(btn)) return;
     btn.disabled = processingActive;
     btn.classList.toggle('is-locked', processingActive);
     btn.title = processingActive ? 'Дождитесь завершения операции' : '';
   });
 
-  document.querySelectorAll('.sb-input,.sb-select,input[type=range],.toggle-wrap input,.toolbar .tb-btn,.nav-btn').forEach(ctrl => {
+  document.querySelectorAll('.sb-input,.sb-select,.range-input,input[type=range],.sl-reset,.toggle-wrap input,.toolbar .tb-btn,.nav-btn').forEach(ctrl => {
     ctrl.disabled = processingActive;
   });
 
-  downloads.forEach(btn => {
-    btn.disabled = !canDownload;
-    btn.classList.toggle('is-locked', !canDownload);
-    btn.title = canDownload ? '' : 'Доступно после полной обработки PDF';
+  exports.forEach(btn => {
+    btn.disabled = !canExport;
+    btn.classList.toggle('is-locked', !canExport);
+    btn.title = canExport ? '' : 'Доступно после импорта PDF';
+  });
+
+  currentDownloads.forEach(btn => {
+    btn.disabled = !canDownloadCurrent;
+    btn.classList.toggle('is-locked', !canDownloadCurrent);
+    btn.title = canDownloadCurrent ? '' : 'Доступно после полной обработки PDF';
   });
 }
 applyActionLocks();
@@ -1096,6 +1237,7 @@ function setTool(tool) {
   document.querySelectorAll('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool === currentTool));
   const canvas = document.querySelector('.canvas-wrap');
   if (canvas) canvas.dataset.tool = currentTool;
+  if (currentTool !== 'eraser') updateEraserCursor(null);
   if (leavingPan) {
     const state = getPageState();
     state.panX = 0;
@@ -1129,6 +1271,51 @@ function activeLayer() {
     inner.appendChild(layer);
   }
   return layer;
+}
+
+function edgeCleanEnabled() {
+  const input = document.querySelectorAll('.toggle-row input')[EDGE_CLEAN_TOGGLE_INDEX];
+  return input ? input.checked : true;
+}
+
+function currentEdgeMargin() {
+  const slider = rangeByOption(EDGE_MARGIN_OPTION);
+  const raw = Number(slider?.value || 5);
+  return Number.isFinite(raw) ? Math.max(0, raw) : 5;
+}
+
+function renderEdgeZone(layer) {
+  if (!layer || !edgeCleanEnabled()) return;
+  const inner = document.querySelector('.page-inner');
+  if (!inner) return;
+  const fullW = Number(inner.dataset.fullWidth) || inner.offsetWidth || 476;
+  const fullH = Number(inner.dataset.fullHeight) || inner.offsetHeight || 636;
+  const rawMargin = currentEdgeMargin();
+  const maxMargin = Math.max(4, Math.floor(Math.min(fullW, fullH) * 0.22));
+  const margin = Math.min(Math.max(rawMargin, 10), maxMargin);
+
+  const zone = document.createElement('div');
+  zone.className = 'edge-zone-overlay';
+  zone.dataset.visualOnly = 'edge-zone';
+
+  const bands = [
+    { left: '0', top: '0', right: '0', height: `${margin}px` },
+    { left: '0', bottom: '0', right: '0', height: `${margin}px` },
+    { left: '0', top: '0', bottom: '0', width: `${margin}px` },
+    { right: '0', top: '0', bottom: '0', width: `${margin}px` }
+  ];
+  bands.forEach(style => {
+    const band = document.createElement('div');
+    band.className = 'edge-zone-band';
+    Object.assign(band.style, style);
+    zone.appendChild(band);
+  });
+
+  const label = document.createElement('div');
+  label.className = 'edge-zone-label';
+  label.textContent = `EDGE ${Math.round(rawMargin)}px`;
+  zone.appendChild(label);
+  layer.appendChild(zone);
 }
 
 function activeCropBox(state=getPageState()) {
@@ -1213,6 +1400,7 @@ function renderOverlays() {
   layer.innerHTML = '';
   const state = getPageState();
   const crop = [...state.overlays].reverse().find(overlay => overlay.type === 'crop');
+  renderEdgeZone(layer);
   const drawOverlay = (overlay, index) => {
     const el = document.createElement('div');
     el.className = `tool-overlay overlay-${overlay.type}`;
@@ -1261,14 +1449,14 @@ function renderOverlays() {
   if (crop) {
     drawOverlay(crop, state.overlays.indexOf(crop));
   }
+  renderEraserCursor(layer);
 }
 
 function applyPreviewFilters() {
   const img = document.querySelector('.page-preview-img');
   if (!img) return;
-  const ranges = document.querySelectorAll('input[type=range]');
-  const brightness = Number(ranges[2]?.value || 0);
-  const contrast = Number(ranges[3]?.value || 100);
+  const brightness = Number(rangeByOption('brightness')?.value || 0);
+  const contrast = Number(rangeByOption('contrast')?.value || 100);
   img.style.filter = `brightness(${Math.max(20, 100 + brightness)}%) contrast(${Math.max(30, contrast)}%)`;
 }
 
@@ -1296,6 +1484,15 @@ function applyPageState() {
   renderOverlays();
 }
 
+function scheduleApplyPageState() {
+  if (pageStateFrame) return;
+  const raf = window.requestAnimationFrame || (callback => setTimeout(callback, 16));
+  pageStateFrame = raf(() => {
+    pageStateFrame = 0;
+    applyPageState();
+  });
+}
+
 function clearPageState() {
   const key = pageKey();
   const previous = JSON.parse(JSON.stringify(getPageState()));
@@ -1311,10 +1508,9 @@ function setPageSkip(active) {
   const state = getPageState();
   state.skip = typeof active === 'boolean' ? active : !state.skip;
   setEdits(currentDocument.edits + 1);
-  const thumb = document.querySelector(`.thumb-item[data-page="${currentDocument.page}"] .thumb-dot`);
-  if (thumb) thumb.className = state.skip ? 'thumb-dot td-skip' : 'thumb-dot td-work';
+  setThumbStatus(currentDocument.page, state.skip ? 'skip' : 'wait');
   syncPageEdits();
-  window.crystalUI?.setStatus(state.skip ? '● Страница помечена: не чистить' : '● Страница снова в обработке', 'ready');
+  window.crystalUI?.setStatus(state.skip ? '● Страница помечена: не чистить' : '● Страница снова в очереди', 'ready');
 }
 
 function removeProtectOverlays() {
@@ -1337,8 +1533,88 @@ function addOverlay(overlay) {
   state.overlays.push(overlay);
   pushUndo({ type: 'overlay', page: pageKey(), overlay });
   setEdits(currentDocument.edits + 1);
-  applyPageState();
+  if (overlay.type === 'crop') scheduleApplyPageState();
+  else applyPageState();
   syncPageEdits();
+}
+
+const DEFAULT_ERASER_SIZE = 7;
+
+function cloneState(state) {
+  return JSON.parse(JSON.stringify(state));
+}
+
+function currentEraserSize() {
+  const slider = rangeByLocal(ERASER_SIZE_LOCAL);
+  const raw = Number(slider?.value || DEFAULT_ERASER_SIZE);
+  return Number.isFinite(raw) ? Math.max(1, Math.min(30, raw)) : DEFAULT_ERASER_SIZE;
+}
+
+function placeEraserCursor(cursor, point) {
+  const size = currentEraserSize();
+  cursor.style.left = `${point.x}%`;
+  cursor.style.top = `${point.y}%`;
+  cursor.style.width = `${size}%`;
+  cursor.style.height = `${size}%`;
+}
+
+function updateEraserCursor(point) {
+  lastEraserPoint = currentTool === 'eraser' ? point : null;
+  const layer = activeLayer();
+  if (!layer) return;
+  let cursor = layer.querySelector('.eraser-cursor');
+  if (!lastEraserPoint) {
+    if (cursor) cursor.remove();
+    return;
+  }
+  if (!cursor) {
+    cursor = document.createElement('div');
+    cursor.className = 'eraser-cursor';
+    layer.appendChild(cursor);
+  }
+  placeEraserCursor(cursor, lastEraserPoint);
+}
+
+function renderEraserCursor(layer) {
+  if (currentTool !== 'eraser' || !lastEraserPoint || !layer) return;
+  const cursor = document.createElement('div');
+  cursor.className = 'eraser-cursor';
+  placeEraserCursor(cursor, lastEraserPoint);
+  layer.appendChild(cursor);
+}
+
+function appendEraserPoint(state, point, size=currentEraserSize()) {
+  state.overlays.push({ type: 'eraser', x: point.x, y: point.y, size });
+}
+
+function addEraserSegment(drag, point) {
+  const state = getPageState();
+  const last = drag.lastPoint || point;
+  const dx = point.x - last.x;
+  const dy = point.y - last.y;
+  const distance = Math.hypot(dx, dy);
+  const size = drag.eraserSize || currentEraserSize();
+  const step = Math.max(0.8, size / 4);
+  const count = Math.max(1, Math.ceil(distance / step));
+  for (let i = 1; i <= count; i++) {
+    const t = i / count;
+    appendEraserPoint(state, {
+      x: last.x + dx * t,
+      y: last.y + dy * t
+    }, size);
+  }
+  drag.lastPoint = point;
+  drag.erased = true;
+  renderOverlays();
+}
+
+function finishEraserStroke(drag) {
+  if (!drag?.erased) return;
+  const key = pageKey();
+  const next = cloneState(getPageState());
+  pushUndo({ type: 'state', page: key, previous: drag.previousState, next });
+  setEdits(currentDocument.edits + 1);
+  syncPageEdits(key);
 }
 
 function resizePreviewFrame(img) {
@@ -1356,6 +1632,49 @@ function resizePreviewFrame(img) {
 function setActiveThumb(page) {
   document.querySelectorAll('.thumb-item').forEach(item => {
     item.classList.toggle('on', Number(item.dataset.page) === Number(page));
+  });
+}
+
+function thumbStatusClass(status) {
+  const classes = {
+    ok: 'td-ok',
+    work: 'td-work',
+    wait: 'td-wait',
+    skip: 'td-skip',
+    error: 'td-err',
+    err: 'td-err'
+  };
+  return classes[status] || classes.wait;
+}
+
+function pageThumbStatus(page) {
+  const state = pageStates.get(String(Math.max(1, Number(page) || 1)));
+  return state?.skip ? 'skip' : 'wait';
+}
+
+function setThumbStatus(page, status) {
+  const item = document.querySelector(`.thumb-item[data-page="${Number(page)}"]`);
+  if (!item) return;
+  let dot = item.querySelector('.thumb-dot');
+  if (!dot) {
+    const frame = item.querySelector('.thumb-frame');
+    if (!frame) return;
+    dot = document.createElement('div');
+    dot.className = 'thumb-dot td-wait';
+    frame.appendChild(dot);
+  }
+  dot.className = `thumb-dot ${thumbStatusClass(status)}`;
+}
+
+function resetThumbStatuses() {
+  document.querySelectorAll('.thumb-item[data-page]').forEach(item => {
+    setThumbStatus(item.dataset.page, pageThumbStatus(item.dataset.page));
+  });
+}
+
+function setAllThumbStatuses(status='ok') {
+  document.querySelectorAll('.thumb-item[data-page]').forEach(item => {
+    setThumbStatus(item.dataset.page, status);
   });
 }
 
@@ -1428,9 +1747,6 @@ function showPagePreview(page, pages, color, name, preview) {
     inner.appendChild(placeholder);
   }
 
-  const scan = document.createElement('div');
-  scan.className = 'scan-line';
-  inner.appendChild(scan);
   const layer = document.createElement('div');
   layer.className = 'page-edit-layer';
   inner.appendChild(layer);
@@ -1464,7 +1780,7 @@ function renderDocumentThumbs(thumbs, pages) {
       frame.appendChild(lines);
     }
     const dot = document.createElement('div');
-    dot.className = page === currentDocument.page ? 'thumb-dot td-work' : 'thumb-dot td-wait';
+    dot.className = `thumb-dot ${thumbStatusClass(pageThumbStatus(page))}`;
     frame.appendChild(dot);
 
     const num = document.createElement('div');
@@ -1560,17 +1876,25 @@ function bindCanvasTools() {
       startY: event.clientY,
       panX: state.panX,
       panY: state.panY,
-      lastErase: 0
+      eraserSize: currentTool === 'eraser' ? currentEraserSize() : 0,
+      previousState: cloneState(state),
+      erased: false
     };
 
     if (currentTool === 'eraser' && point) {
-      addOverlay({ type: 'eraser', x: point.x, y: point.y, size: 7 });
-      drag.lastErase = performance.now();
+      updateEraserCursor(point);
+      appendEraserPoint(state, point, drag.eraserSize);
+      drag.erased = true;
+      renderOverlays();
     }
   });
 
   canvas.addEventListener('pointermove', event => {
-    if (!drag) return;
+    const hoverPoint = pagePoint(event);
+    if (!drag) {
+      if (currentTool === 'eraser') updateEraserCursor(hoverPoint);
+      return;
+    }
     event.preventDefault();
     if (drag.tool === 'pan') {
       const state = getPageState();
@@ -1580,14 +1904,11 @@ function bindCanvasTools() {
       return;
     }
 
-    const point = pagePoint(event);
+    const point = hoverPoint;
     if (!point || !drag.startPoint) return;
     if (drag.tool === 'eraser') {
-      const now = performance.now();
-      if (now - drag.lastErase > 45) {
-        addOverlay({ type: 'eraser', x: point.x, y: point.y, size: 7 });
-        drag.lastErase = now;
-      }
+      updateEraserCursor(point);
+      addEraserSegment(drag, point);
       return;
     }
 
@@ -1599,7 +1920,17 @@ function bindCanvasTools() {
   canvas.addEventListener('pointerup', event => {
     if (!drag) return;
     event.preventDefault();
-    if (drag.tool === 'crop' || drag.tool === 'protect') {
+    try {
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    } catch (_err) {}
+    if (drag.tool === 'eraser') {
+      const point = pagePoint(event);
+      if (point && drag.startPoint) {
+        updateEraserCursor(point);
+        addEraserSegment(drag, point);
+      }
+      finishEraserStroke(drag);
+    } else if (drag.tool === 'crop' || drag.tool === 'protect') {
       const point = pagePoint(event);
       if (point && drag.startPoint) {
         const box = clampRect(drag.startPoint, point);
@@ -1613,9 +1944,17 @@ function bindCanvasTools() {
     drag = null;
   });
 
-  canvas.addEventListener('pointercancel', () => {
+  canvas.addEventListener('pointercancel', event => {
+    try {
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    } catch (_err) {}
+    if (drag?.tool === 'eraser') finishEraserStroke(drag);
     drag = null;
     clearDraftBox();
+  });
+
+  canvas.addEventListener('pointerleave', () => {
+    if (!drag && currentTool === 'eraser') updateEraserCursor(null);
   });
 
   canvas.addEventListener('wheel', event => {
@@ -1771,10 +2110,20 @@ window.crystalUI = {
     currentDocument = { name: name || 'PDF', pages: Number(pages) || 0, color: Number(color) || 0, page: Number(activePage) || 1, edits: 0, zoom: currentDocument.zoom || 1 };
     showPagePreview(currentDocument.page, currentDocument.pages, currentDocument.color, currentDocument.name, preview);
     renderDocumentThumbs(thumbs || [], currentDocument.pages);
+    applyActionLocks();
     syncAllPageEdits();
   },
   setPagePreview(page, pages, color, name, preview) {
     showPagePreview(page, pages, color, name, preview);
+  },
+  setPageStatus(page, status) {
+    setThumbStatus(page, status);
+  },
+  resetPageStatuses() {
+    resetThumbStatuses();
+  },
+  setAllPageStatuses(status='ok') {
+    setAllThumbStatuses(status);
   },
   setDeskewAngle(page, angle) {
     applyDeskewAngle(page, angle);
@@ -1858,19 +2207,26 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
     const output = document.querySelector('.sb-input');
     if (output) output.addEventListener('change', () => bridge.setOutputPath(output.value));
 
+    document.querySelectorAll('.range-input[data-option]').forEach(input => {
+      const pushRange = () => bridge.setOption(input.dataset.option, input.value || '');
+      input.addEventListener('change', pushRange);
+      input.addEventListener('input', pushRange);
+    });
+
     document.querySelectorAll('.toggle-row').forEach(row => {
       const label = row.querySelector('.toggle-lbl');
       const input = row.querySelector('input');
       if (!input || !label) return;
-      input.addEventListener('change', () => bridge.setOption(nativeOptionName(label.textContent), input.checked ? '1' : '0'));
+      input.addEventListener('change', () => {
+        const optionName = nativeOptionName(label.textContent);
+        if (optionName === 'edge_clean') renderOverlays();
+        bridge.setOption(optionName, input.checked ? '1' : '0');
+      });
     });
 
-    const sliders = ['dot_area','denoise','brightness','contrast','edge_margin','edge_threshold'];
-    document.querySelectorAll('input[type=range]').forEach((r, i) => {
+    document.querySelectorAll('input[type=range][data-option]').forEach(r => {
       r.addEventListener('input', () => {
-        updateTrack(r);
-        applyPreviewFilters();
-        bridge.setOption(sliders[i] || `slider_${i}`, String(r.value));
+        bridge.setOption(r.dataset.option, String(r.value));
       });
     });
 
