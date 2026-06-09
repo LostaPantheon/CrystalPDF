@@ -195,6 +195,9 @@ body::after{
 .btn-a:hover{background:rgba(255,190,61,.14);border-color:rgba(255,190,61,.48)}
 .btn-r{background:var(--rdd);border-color:rgba(255,95,126,.28);color:var(--rd)}
 .btn-r:hover{background:rgba(255,95,126,.14);border-color:rgba(255,95,126,.48)}
+.line-crop-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-bottom:6px}
+.line-crop-row .btn{margin-bottom:0;padding:8px 8px;font-size:11px}
+.line-crop-row .btn-crop-line{width:auto;min-width:76px;padding:8px 10px}
 .btn-v{background:linear-gradient(135deg,rgba(157,123,255,.1),rgba(244,114,182,.06));border-color:rgba(157,123,255,.3);color:var(--vi)}
 .btn-v:hover{background:rgba(157,123,255,.18);border-color:rgba(157,123,255,.5)}
 .btn:disabled,.btn.is-locked,.cancel-btn:disabled{
@@ -399,7 +402,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   background:transparent;color:var(--t1);border-color:transparent;
 }
 .tb-sep{width:1px;height:20px;background:var(--bd2);margin:0 6px;flex-shrink:0}
-.tb-right{margin-left:auto;display:flex;align-items:center;gap:4px}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:4px;position:relative}
 .zoom-lbl{font-family:var(--mono);font-size:11px;color:var(--t1);padding:0 6px;min-width:46px;text-align:center}
 
 /* ── Canvas ── */
@@ -409,9 +412,11 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 }
 .canvas-wrap:active{cursor:grabbing}
 .canvas-wrap[data-tool="view"]{cursor:default}
-.canvas-wrap[data-tool="eraser"]{cursor:crosshair}
+.canvas-wrap[data-tool="eraser"]{cursor:none}
 .canvas-wrap[data-tool="crop"]{cursor:crosshair}
 .canvas-wrap[data-tool="protect"]{cursor:crosshair}
+.canvas-wrap[data-tool^="split-"]{cursor:col-resize}
+.canvas-wrap[data-tool="split-horizontal"]{cursor:row-resize}
 .is-processing .canvas-wrap{pointer-events:none;cursor:wait}
 .canvas-wrap::before{
   content:'';position:absolute;inset:0;pointer-events:none;
@@ -440,16 +445,16 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .page-edit-layer{position:absolute;inset:0;z-index:4;pointer-events:none}
 .tool-overlay{position:absolute;pointer-events:none;z-index:2}
 .overlay-eraser{
-  border-radius:50%;background:rgba(255,255,255,.96);
-  border:1px dashed rgba(17,24,39,.42);
-  box-shadow:0 0 0 1px rgba(255,190,61,.16),0 2px 8px rgba(0,0,0,.10);
+  border-radius:50%;background:#fff;
+  border:0;
+  box-shadow:none;
 }
 .eraser-cursor{
   position:absolute;pointer-events:none;z-index:9;border-radius:50%;
-  background:rgba(255,255,255,.18);
-  border:2px solid rgba(17,24,39,.72);
-  outline:2px solid rgba(255,190,61,.45);
-  box-shadow:0 0 0 1px rgba(255,255,255,.42),0 0 18px rgba(255,190,61,.18);
+  background:transparent;
+  border:2px solid rgba(0,229,255,.95);
+  outline:1px solid rgba(3,6,16,.72);
+  box-shadow:0 0 0 1px rgba(255,255,255,.45),0 0 16px rgba(0,229,255,.32);
   transform:translate(-50%,-50%);
 }
 .overlay-crop{z-index:7;border:1px solid rgba(255,190,61,.9);background:rgba(255,190,61,.10);box-shadow:0 0 18px rgba(255,190,61,.14),inset 0 0 0 1px rgba(255,255,255,.16)}
@@ -457,6 +462,26 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .overlay-draft{border-style:dashed;background:rgba(157,123,255,.08)}
 .overlay-crop.overlay-draft{background:rgba(255,190,61,.10)}
 .overlay-protect.overlay-draft{background:rgba(0,229,255,.10)}
+.overlay-split{
+  z-index:8;background:transparent;border:0;overflow:visible;
+  filter:drop-shadow(0 0 10px rgba(0,229,255,.45));
+}
+.overlay-split.split-vertical{
+  width:0;height:100%;border-left:3px solid var(--c0);
+  box-shadow:0 0 0 1px rgba(3,6,16,.85),0 0 22px rgba(0,229,255,.42);
+}
+.overlay-split.split-horizontal{
+  width:100%;height:0;border-top:3px solid var(--c0);
+  box-shadow:0 0 0 1px rgba(3,6,16,.85),0 0 22px rgba(0,229,255,.42);
+}
+.split-label{
+  position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+  padding:4px 8px;border-radius:999px;background:rgba(2,5,16,.92);
+  border:1px solid rgba(0,229,255,.5);color:var(--c0);
+  font-family:var(--mono);font-size:9px;font-weight:800;letter-spacing:.8px;
+  white-space:nowrap;box-shadow:0 0 18px rgba(0,229,255,.22);
+}
+.split-vertical .split-label{transform:translate(-50%,-50%) rotate(-90deg)}
 .crop-mask{display:none}
 .protect-original{position:absolute;overflow:hidden;pointer-events:none;z-index:4}
 .protect-original img{position:absolute;display:block;max-width:none;max-height:none;filter:none}
@@ -588,6 +613,45 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .rgb-badge{display:inline-flex;align-items:center;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:700;font-family:var(--mono);background:var(--abd);border:1px solid rgba(255,190,61,.3);color:var(--ab);margin-left:4px;vertical-align:middle}
 .sep{height:1px;background:var(--bd);margin:4px 0}
 .info-lbl{font-size:10px;padding:5px 8px;border-radius:var(--rx);background:var(--abd);border:1px solid rgba(255,190,61,.2);color:var(--ab);margin-top:8px}
+.tutorial-launch{
+  position:static;z-index:70;
+  display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;
+  border:1px solid rgba(0,229,255,.38);
+  background:linear-gradient(135deg,rgba(0,229,255,.16),rgba(157,123,255,.10));
+  color:var(--c0);font-family:var(--sans);font-size:11.5px;font-weight:800;
+  letter-spacing:.2px;cursor:pointer;box-shadow:0 0 20px rgba(0,229,255,.12);
+  white-space:nowrap;
+}
+.tutorial-launch:hover{border-color:rgba(0,229,255,.62);box-shadow:0 0 26px rgba(0,229,255,.2)}
+.tour-layer{position:fixed;inset:0;z-index:90;display:none;pointer-events:none}
+.tour-layer.on{display:block;pointer-events:auto}
+.tour-scrim{position:absolute;inset:0;background:transparent}
+.tour-shade{position:absolute;background:rgba(0,0,0,.58);backdrop-filter:blur(2px)}
+.tour-focus{
+  position:absolute;border:2px solid var(--c0);border-radius:14px;
+  box-shadow:0 0 0 9999px rgba(0,0,0,.2),0 0 34px rgba(0,229,255,.42);
+  pointer-events:none;transition:all .22s ease;
+}
+.tour-arrow{
+  position:absolute;width:min(370px,calc(100vw - 32px));min-height:118px;
+  padding:18px 58px 18px 28px;
+  background:linear-gradient(135deg,rgba(0,229,255,.96),rgba(157,123,255,.95));
+  color:#021018;clip-path:polygon(0 0,calc(100% - 46px) 0,100% 50%,calc(100% - 46px) 100%,0 100%,18px 50%);
+  filter:drop-shadow(0 18px 44px rgba(0,0,0,.52));transition:left .22s ease,top .22s ease;
+}
+.tour-arrow[data-point="left"]{padding:18px 28px 18px 58px;clip-path:polygon(46px 0,100% 0,calc(100% - 18px) 50%,100% 100%,46px 100%,0 50%)}
+.tour-arrow[data-point="up"]{padding:48px 24px 18px;clip-path:polygon(0 46px,45% 46px,50% 0,55% 46px,100% 46px,100% 100%,0 100%)}
+.tour-arrow[data-point="down"]{padding:18px 24px 48px;clip-path:polygon(0 0,100% 0,100% calc(100% - 46px),55% calc(100% - 46px),50% 100%,45% calc(100% - 46px),0 calc(100% - 46px))}
+.tour-title{font-size:15px;font-weight:900;letter-spacing:-.1px;margin-bottom:6px}
+.tour-text{font-size:12px;font-weight:700;line-height:1.32;color:rgba(2,16,24,.82);max-width:285px}
+.tour-controls{display:flex;align-items:center;gap:7px;margin-top:13px}
+.tour-btn{
+  border:1px solid rgba(2,16,24,.22);background:rgba(255,255,255,.35);
+  color:#021018;border-radius:8px;padding:6px 10px;font-family:var(--sans);
+  font-size:11px;font-weight:900;cursor:pointer;
+}
+.tour-btn:hover{background:rgba(255,255,255,.55)}
+.tour-step{margin-left:auto;font-family:var(--mono);font-size:10px;font-weight:900;color:rgba(2,16,24,.62)}
 </style>
 </head>
 <body>
@@ -635,8 +699,8 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <div class="icon-box ib-c">⬆</div>
             <div class="card-title">Импорт / Экспорт</div>
           </div>
-          <button class="btn btn-c">⬆&nbsp; Импорт PDF</button>
-          <button class="btn btn-g">⬇&nbsp; Экспорт PDF</button>
+          <button class="btn btn-c" data-tour="import-pdf">⬆&nbsp; Импорт PDF</button>
+          <button class="btn btn-g" data-tour="export-pdf">⬇&nbsp; Экспорт PDF</button>
           <div class="file-chip">нет файла</div>
           <div class="field-lbl">Выходной файл</div>
           <input class="sb-input" type="text" placeholder="~/Downloads/scan_CrystalPDF.pdf">
@@ -660,7 +724,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <div class="icon-box ib-c">⚡</div>
             <div class="card-title">Настройки обработки</div>
           </div>
-          <select class="sb-select" onchange="document.querySelector('.mode-hint').textContent=this.options[this.selectedIndex].dataset.hint">
+          <select class="sb-select" data-tour="mode" onchange="document.querySelector('.mode-hint').textContent=this.options[this.selectedIndex].dataset.hint">
             <option data-hint="Минимальная обработка, сохранение деталей">✨&nbsp; Лёгкая</option>
             <option selected data-hint="Оптимально для большинства сканов">⚡&nbsp; Стандартная</option>
             <option data-hint="Глубокая очистка, возможна потеря деталей">🔥&nbsp; Агрессивная</option>
@@ -693,7 +757,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
           <div class="info-lbl">🎨 4 цветных стр. будут сохранены без конвертации</div>
           <div class="field-lbl" style="margin-top:10px">Диапазон очистки</div>
           <div class="range-row single">
-            <label class="range-box"><span>стр.</span><input class="range-input" data-option="clean_ranges" type="text" placeholder="например: 1-7, 25-50"></label>
+            <label class="range-box"><span>стр.</span><input class="range-input" data-option="clean_ranges" data-tour="range" type="text" placeholder="например: 1-7, 25-50"></label>
           </div>
           <div class="info-lbl">Пустое поле означает очистку всех страниц. Можно указать: 1-7, 25-50, 80.</div>
         </div>
@@ -704,7 +768,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
     <div class="sb-sec">
       <div class="sb-sec-label">Тонкая настройка<span class="sec-arrow">›</span></div>
       <div class="sb-sec-body">
-        <div class="sb-card">
+        <div class="sb-card" data-tour="tuning">
           <div class="card-head">
             <div class="icon-box ib-a">⚙</div>
             <div class="card-title">Параметры алгоритма</div>
@@ -726,8 +790,8 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <input type="range" min="50" max="200" value="100" data-option="contrast" data-default="100" oninput="document.getElementById('sv4').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
-            <div class="sl-head"><span class="sl-name">Зона краёв (px)</span><span class="sl-val" id="sv5">5</span></div>
-            <input type="range" min="5" max="150" value="5" data-option="edge_margin" data-default="5" oninput="document.getElementById('sv5').textContent=this.value;updateTrack(this)">
+            <div class="sl-head"><span class="sl-name">Зона краёв (px)</span><span class="sl-val" id="sv5">0</span></div>
+            <input type="range" min="0" max="150" value="0" data-option="edge_margin" data-default="0" oninput="document.getElementById('sv5').textContent=this.value;updateTrack(this)">
           </div>
           <div class="sl-row">
             <div class="sl-head"><span class="sl-name">Порог тёмной линии</span><span class="sl-val" id="sv6">60</span></div>
@@ -741,14 +805,17 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
     <div class="sb-sec">
       <div class="sb-sec-label">Текущая страница<span class="sec-arrow">›</span></div>
       <div class="sb-sec-body">
-        <div class="sb-card">
+        <div class="sb-card" data-tour="page-tools">
           <div class="card-head">
             <div class="icon-box ib-r">📄</div>
             <div class="card-title">Операции со страницей</div>
           </div>
           <button class="btn btn-ghost">+&nbsp; Добавить страницу</button>
-          <button class="btn btn-a">↔&nbsp; Линия лев/прав</button>
-          <button class="btn btn-a">↕&nbsp; Линия верх/низ</button>
+          <div class="line-crop-row">
+            <button class="btn btn-a" data-tour="split-vertical" data-action="split-vertical">↔&nbsp; Лев/прав</button>
+            <button class="btn btn-a" data-tour="split-horizontal" data-action="split-horizontal">↕&nbsp; Верх/низ</button>
+            <button class="btn btn-r btn-crop-line" data-tour="split-apply" data-action="apply-split-crop">✂&nbsp; Обрезать</button>
+          </div>
           <button class="btn btn-ghost">☐&nbsp; Не чистить стр.</button>
           <button class="btn btn-ghost">□&nbsp; Снять защиту области</button>
           <button class="btn btn-g">↓&nbsp; Скачать текущую</button>
@@ -790,7 +857,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   </div>
 
   <div class="sb-foot">
-    <button class="btn btn-mega" id="megaBtn">▶&nbsp;&nbsp;Запустить очистку</button>
+    <button class="btn btn-mega" id="megaBtn" data-tour="start-cleaning">▶&nbsp;&nbsp;Запустить очистку</button>
     <button class="cancel-btn">Отмена обработки</button>
     <div class="prog-wrap">
       <div class="prog-head">
@@ -848,7 +915,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   </div>
 
   <!-- Toolbar -->
-  <div class="toolbar">
+  <div class="toolbar" data-tour="toolbar">
     <button class="tb-btn">↶ Отмена</button>
     <button class="tb-btn">↷ Повтор</button>
     <div class="tb-sep"></div>
@@ -868,12 +935,13 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
     <span class="zoom-lbl" id="zoom-lbl">100%</span>
     <button class="tb-btn" onclick="changeZoom(1)">+</button>
     <div class="tb-right">
+      <button class="tutorial-launch" type="button">? Обучение</button>
       <button class="tb-btn rd-c">✕ Сброс стр.</button>
     </div>
   </div>
 
   <!-- Canvas -->
-  <div class="canvas-wrap">
+  <div class="canvas-wrap" data-tour="canvas">
     <div class="page-glow"></div>
     <div class="canvas-tools">
       <span style="font-size:11px;color:var(--t1);font-family:var(--mono)">Стр. 3 / 22</span>
@@ -909,7 +977,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   </div>
 
   <!-- Thumbnails -->
-  <div class="thumb-strip">
+  <div class="thumb-strip" data-tour="thumbs">
     <div class="thumb-item"><div class="thumb-frame"><div class="thumb-lines"><div class="tl h"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div></div><div class="thumb-dot td-ok"></div></div><div class="thumb-num">1</div></div>
     <div class="thumb-item"><div class="thumb-frame"><div class="thumb-lines"><div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div></div><div class="thumb-dot td-ok"></div></div><div class="thumb-num">2</div></div>
     <div class="thumb-item on"><div class="thumb-frame" style="background:linear-gradient(160deg,#fff8ef,#fff)"><div class="thumb-lines"><div class="tl h" style="background:#d4a050;width:72%"></div><div class="tl" style="background:#e0c090"></div><div class="tl s" style="background:#e0c090"></div><div class="tl" style="background:#a0b8d0"></div><div class="tl s" style="background:#b8d0a8"></div><div class="tl d" style="background:#c0a060"></div><div class="tl"></div><div class="tl s"></div></div><div class="thumb-dot td-work"></div><div class="clr-bar"></div></div><div class="thumb-num" style="color:var(--ab)">3 ✦</div></div>
@@ -951,6 +1019,26 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   </div>
 
 </main>
+</div>
+
+<div class="tour-layer" aria-hidden="true">
+  <div class="tour-scrim">
+    <div class="tour-shade tour-shade-top"></div>
+    <div class="tour-shade tour-shade-bottom"></div>
+    <div class="tour-shade tour-shade-left"></div>
+    <div class="tour-shade tour-shade-right"></div>
+  </div>
+  <div class="tour-focus"></div>
+  <div class="tour-arrow" data-point="right">
+    <div class="tour-title"></div>
+    <div class="tour-text"></div>
+    <div class="tour-controls">
+      <button class="tour-btn" type="button" data-tour-action="prev">Назад</button>
+      <button class="tour-btn" type="button" data-tour-action="next">Дальше</button>
+      <button class="tour-btn" type="button" data-tour-action="close">Закрыть</button>
+      <span class="tour-step"></span>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1135,9 +1223,15 @@ let processingActive = false;
 let downloadReady = false;
 let pageStateFrame = 0;
 let lastEraserPoint = null;
+let thumbObserver = null;
+let thumbRequestTimer = 0;
 const pageStates = new Map();
 const undoStack = [];
 const redoStack = [];
+const loadedThumbPages = new Set();
+const requestedThumbPages = new Set();
+const queuedThumbPages = new Set();
+const THUMB_REQUEST_BATCH = 36;
 
 function buttonTextHas(btn, values) {
   const text = (btn?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -1230,6 +1324,14 @@ function syncAllPageEdits() {
   pageStates.forEach((_state, page) => syncPageEdits(Number(page)));
 }
 
+function isSplitTool(tool=currentTool) {
+  return tool === 'split-vertical' || tool === 'split-horizontal';
+}
+
+function splitOrientationFromTool(tool=currentTool) {
+  return tool === 'split-horizontal' ? 'horizontal' : 'vertical';
+}
+
 function setTool(tool) {
   const nextTool = tool || 'pan';
   const leavingPan = currentTool === 'pan' && nextTool !== 'pan';
@@ -1244,7 +1346,15 @@ function setTool(tool) {
     state.panY = 0;
     applyPageState();
   }
-  const names = { view: 'Просмотр', pan: 'Рука', eraser: 'Ластик', crop: 'Обрезка', protect: 'Защита области' };
+  const names = {
+    view: 'Просмотр',
+    pan: 'Рука',
+    eraser: 'Ластик',
+    crop: 'Обрезка',
+    protect: 'Защита области',
+    'split-vertical': 'Линия лев/прав',
+    'split-horizontal': 'Линия верх/низ'
+  };
   window.crystalUI?.setStatus(`● Инструмент: ${names[currentTool] || currentTool}`, 'ready');
 }
 
@@ -1257,7 +1367,7 @@ function setEdits(value) {
 }
 
 function pushUndo(action) {
-  undoStack.push(action);
+  undoStack.push(cloneHistoryAction(action));
   redoStack.length = 0;
 }
 
@@ -1280,8 +1390,8 @@ function edgeCleanEnabled() {
 
 function currentEdgeMargin() {
   const slider = rangeByOption(EDGE_MARGIN_OPTION);
-  const raw = Number(slider?.value || 5);
-  return Number.isFinite(raw) ? Math.max(0, raw) : 5;
+  const raw = Number(slider?.value || 0);
+  return Number.isFinite(raw) ? Math.max(0, raw) : 0;
 }
 
 function renderEdgeZone(layer) {
@@ -1291,8 +1401,9 @@ function renderEdgeZone(layer) {
   const fullW = Number(inner.dataset.fullWidth) || inner.offsetWidth || 476;
   const fullH = Number(inner.dataset.fullHeight) || inner.offsetHeight || 636;
   const rawMargin = currentEdgeMargin();
+  if (rawMargin <= 0) return;
   const maxMargin = Math.max(4, Math.floor(Math.min(fullW, fullH) * 0.22));
-  const margin = Math.min(Math.max(rawMargin, 10), maxMargin);
+  const margin = Math.min(Math.max(rawMargin, 1), maxMargin);
 
   const zone = document.createElement('div');
   zone.className = 'edge-zone-overlay';
@@ -1406,11 +1517,33 @@ function renderOverlays() {
     el.className = `tool-overlay overlay-${overlay.type}`;
     el.dataset.index = String(index);
     if (overlay.type === 'eraser') {
+      const diameter = eraserDiameterPx(overlay.size);
       el.style.left = `${overlay.x}%`;
       el.style.top = `${overlay.y}%`;
-      el.style.width = `${overlay.size}%`;
-      el.style.height = `${overlay.size}%`;
+      el.style.width = `${diameter}px`;
+      el.style.height = `${diameter}px`;
       el.style.transform = 'translate(-50%, -50%)';
+    } else if (overlay.type === 'split') {
+      const orientation = overlay.orientation === 'horizontal' ? 'horizontal' : 'vertical';
+      const pos = Math.max(2, Math.min(98, Number(overlay.pos) || 50));
+      el.className = `tool-overlay overlay-split split-${orientation}`;
+      if (orientation === 'horizontal') {
+        el.style.left = '0';
+        el.style.top = `${pos}%`;
+        el.style.width = '100%';
+        el.style.height = '0';
+        el.style.transform = 'translateY(-50%)';
+      } else {
+        el.style.left = `${pos}%`;
+        el.style.top = '0';
+        el.style.width = '0';
+        el.style.height = '100%';
+        el.style.transform = 'translateX(-50%)';
+      }
+      const label = document.createElement('span');
+      label.className = 'split-label';
+      label.textContent = orientation === 'horizontal' ? 'ВЕРХ / НИЗ' : 'ЛЕВ / ПРАВ';
+      el.appendChild(label);
     } else {
       el.style.left = `${overlay.x}%`;
       el.style.top = `${overlay.y}%`;
@@ -1544,18 +1677,126 @@ function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
 }
 
+function cloneOverlay(overlay) {
+  return JSON.parse(JSON.stringify(overlay || {}));
+}
+
+function cloneHistoryAction(action) {
+  if (!action || typeof action !== 'object') return action;
+  const page = pageKey(action.page);
+  if (action.type === 'state') {
+    return {
+      type: 'state',
+      page,
+      previous: cloneState(action.previous || makePageState()),
+      next: cloneState(action.next || makePageState())
+    };
+  }
+  if (action.type === 'overlay') {
+    return { type: 'overlay', page, overlay: cloneOverlay(action.overlay) };
+  }
+  return { ...action, page };
+}
+
+function restorePageSnapshot(page, snapshot) {
+  const key = pageKey(page);
+  pageStates.set(key, cloneState(snapshot || makePageState()));
+  return key;
+}
+
+function overlayValueEqual(a, b) {
+  if (!a || !b || a.type !== b.type) return false;
+  const keys = ['x', 'y', 'w', 'h', 'size', 'pos'];
+  const numbersEqual = keys.every(key => {
+    if (!(key in a) && !(key in b)) return true;
+    const av = Number(a[key]);
+    const bv = Number(b[key]);
+    return Number.isFinite(av) && Number.isFinite(bv) && Math.abs(av - bv) < 0.001;
+  });
+  return numbersEqual && String(a.orientation || '') === String(b.orientation || '');
+}
+
+function findOverlayIndex(overlays, overlay) {
+  const direct = overlays.lastIndexOf(overlay);
+  if (direct >= 0) return direct;
+  for (let index = overlays.length - 1; index >= 0; index--) {
+    if (overlayValueEqual(overlays[index], overlay)) return index;
+  }
+  return -1;
+}
+
 function currentEraserSize() {
   const slider = rangeByLocal(ERASER_SIZE_LOCAL);
   const raw = Number(slider?.value || DEFAULT_ERASER_SIZE);
   return Number.isFinite(raw) ? Math.max(1, Math.min(30, raw)) : DEFAULT_ERASER_SIZE;
 }
 
+function pageFullSize() {
+  const inner = document.querySelector('.page-inner');
+  const width = Number(inner?.dataset.fullWidth) || inner?.offsetWidth || 476;
+  const height = Number(inner?.dataset.fullHeight) || inner?.offsetHeight || 636;
+  return { width, height };
+}
+
+function eraserDiameterPx(size=currentEraserSize()) {
+  const { width, height } = pageFullSize();
+  const raw = Number(size) || DEFAULT_ERASER_SIZE;
+  return Math.max(6, Math.round(Math.min(width, height) * Math.max(1, Math.min(30, raw)) / 100));
+}
+
 function placeEraserCursor(cursor, point) {
-  const size = currentEraserSize();
+  const size = eraserDiameterPx();
   cursor.style.left = `${point.x}%`;
   cursor.style.top = `${point.y}%`;
-  cursor.style.width = `${size}%`;
-  cursor.style.height = `${size}%`;
+  cursor.style.width = `${size}px`;
+  cursor.style.height = `${size}px`;
+}
+
+function splitLineForState(state=getPageState()) {
+  return [...state.overlays].reverse().find(overlay => overlay.type === 'split') || null;
+}
+
+function setSplitLine(orientation, position=50, pushHistory=true) {
+  const state = getPageState();
+  const previous = cloneState(state);
+  const safeOrientation = orientation === 'horizontal' ? 'horizontal' : 'vertical';
+  const safePosition = Math.max(2, Math.min(98, Number(position) || 50));
+  state.overlays = state.overlays.filter(overlay => overlay.type !== 'split');
+  state.overlays.push({ type: 'split', orientation: safeOrientation, pos: safePosition });
+  if (pushHistory) {
+    pushUndo({ type: 'state', page: pageKey(), previous, next: cloneState(state) });
+    setEdits(currentDocument.edits + 1);
+    syncPageEdits();
+  }
+  applyPageState();
+}
+
+function updateSplitLineFromPoint(point, orientation=splitOrientationFromTool()) {
+  if (!point) return false;
+  const state = getPageState();
+  const split = splitLineForState(state);
+  const safeOrientation = orientation === 'horizontal' ? 'horizontal' : 'vertical';
+  const position = safeOrientation === 'horizontal' ? point.y : point.x;
+  if (split) {
+    split.orientation = safeOrientation;
+    split.pos = Math.max(2, Math.min(98, position));
+  } else {
+    state.overlays.push({ type: 'split', orientation: safeOrientation, pos: Math.max(2, Math.min(98, position)) });
+  }
+  applyPageState();
+  return true;
+}
+
+function startSplitLine(orientation) {
+  const safeOrientation = orientation === 'horizontal' ? 'horizontal' : 'vertical';
+  setTool(`split-${safeOrientation}`);
+  setSplitLine(safeOrientation, 50, true);
+  window.crystalUI?.setStatus(
+    safeOrientation === 'vertical'
+      ? '● Линия лев/прав: перетащите и нажмите Обрезать'
+      : '● Линия верх/низ: перетащите и нажмите Обрезать',
+    'ready'
+  );
 }
 
 function updateEraserCursor(point) {
@@ -1633,6 +1874,11 @@ function setActiveThumb(page) {
   document.querySelectorAll('.thumb-item').forEach(item => {
     item.classList.toggle('on', Number(item.dataset.page) === Number(page));
   });
+}
+
+function scrollActiveThumbIntoView() {
+  const active = document.querySelector(`.thumb-item[data-page="${Number(currentDocument.page)}"]`);
+  if (active) active.scrollIntoView({ block: 'nearest', inline: 'center' });
 }
 
 function thumbStatusClass(status) {
@@ -1752,64 +1998,175 @@ function showPagePreview(page, pages, color, name, preview) {
   inner.appendChild(layer);
   updatePageChrome(currentDocument.page, currentDocument.pages, currentDocument.color, currentDocument.name);
   setActiveThumb(currentDocument.page);
+  requestThumbWindow(currentDocument.page, 12);
   applyPageState();
+}
+
+function thumbPlaceholderHtml(page) {
+  const variant = Math.abs(Number(page) || 1) % 4;
+  if (variant === 0) return '<div class="tl h"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div>';
+  if (variant === 1) return '<div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div>';
+  if (variant === 2) return '<div class="tl h"></div><div class="tl"></div><div class="tl d"></div><div class="tl s"></div><div class="tl"></div><div class="tl d"></div>';
+  return '<div class="tl"></div><div class="tl d"></div><div class="tl s"></div><div class="tl"></div><div class="tl d"></div><div class="tl s"></div>';
+}
+
+function resetThumbLazyState() {
+  if (thumbObserver) {
+    thumbObserver.disconnect();
+    thumbObserver = null;
+  }
+  if (thumbRequestTimer) {
+    clearTimeout(thumbRequestTimer);
+    thumbRequestTimer = 0;
+  }
+  loadedThumbPages.clear();
+  requestedThumbPages.clear();
+  queuedThumbPages.clear();
+}
+
+function createThumbItem(page, image='') {
+  const item = document.createElement('div');
+  item.className = 'thumb-item' + (page === currentDocument.page ? ' on' : '');
+  item.dataset.page = String(page);
+
+  const frame = document.createElement('div');
+  frame.className = 'thumb-frame';
+  if (image) {
+    const img = document.createElement('img');
+    img.className = 'thumb-img';
+    img.alt = `Страница ${page}`;
+    img.src = image;
+    frame.appendChild(img);
+    item.dataset.thumbLoaded = '1';
+    loadedThumbPages.add(page);
+  } else {
+    const lines = document.createElement('div');
+    lines.className = 'thumb-lines';
+    lines.innerHTML = thumbPlaceholderHtml(page);
+    frame.appendChild(lines);
+  }
+
+  const dot = document.createElement('div');
+  dot.className = `thumb-dot ${thumbStatusClass(pageThumbStatus(page))}`;
+  frame.appendChild(dot);
+
+  const num = document.createElement('div');
+  num.className = 'thumb-num';
+  num.textContent = String(page);
+
+  item.appendChild(frame);
+  item.appendChild(num);
+  item.addEventListener('click', () => {
+    goToPage(page);
+    requestThumbWindow(page, 12);
+  });
+  return item;
+}
+
+function flushQueuedThumbRequests() {
+  thumbRequestTimer = 0;
+  if (!queuedThumbPages.size || !window.crystalUI?.bridge?.renderThumbs) return;
+  const pages = Array.from(queuedThumbPages)
+    .filter(page => !loadedThumbPages.has(page))
+    .sort((a, b) => a - b)
+    .slice(0, THUMB_REQUEST_BATCH);
+  pages.forEach(page => queuedThumbPages.delete(page));
+  if (!pages.length) return;
+  pages.forEach(page => requestedThumbPages.add(page));
+  window.crystalUI.bridge.renderThumbs(JSON.stringify(pages));
+  if (queuedThumbPages.size && !thumbRequestTimer) {
+    thumbRequestTimer = setTimeout(flushQueuedThumbRequests, 90);
+  }
+}
+
+function requestThumbPages(pages) {
+  (pages || []).forEach(rawPage => {
+    const page = Math.max(1, Math.min(Number(rawPage) || 1, Math.max(1, currentDocument.pages || 1)));
+    if (loadedThumbPages.has(page) || requestedThumbPages.has(page)) return;
+    queuedThumbPages.add(page);
+  });
+  if (queuedThumbPages.size && !thumbRequestTimer) {
+    thumbRequestTimer = setTimeout(flushQueuedThumbRequests, 40);
+  }
+}
+
+function requestThumbWindow(centerPage=currentDocument.page, radius=18) {
+  const center = Math.max(1, Math.min(Number(centerPage) || 1, Math.max(1, currentDocument.pages || 1)));
+  const start = Math.max(1, center - radius);
+  const end = Math.min(currentDocument.pages || 1, center + radius);
+  const pages = [];
+  for (let page = start; page <= end; page++) pages.push(page);
+  requestThumbPages(pages);
+}
+
+function observeThumbItem(item) {
+  if (!item || loadedThumbPages.has(Number(item.dataset.page))) return;
+  if (thumbObserver) thumbObserver.observe(item);
+}
+
+function setupThumbLazyLoading() {
+  if (thumbObserver) thumbObserver.disconnect();
+  const strip = document.querySelector('.thumb-strip');
+  if (!strip) return;
+  if (!('IntersectionObserver' in window)) {
+    requestThumbWindow(currentDocument.page, 30);
+    return;
+  }
+  thumbObserver = new IntersectionObserver(entries => {
+    const pages = [];
+    entries.forEach(entry => {
+      if (!entry.isIntersecting) return;
+      const page = Number(entry.target.dataset.page);
+      if (Number.isFinite(page)) pages.push(page);
+    });
+    requestThumbPages(pages);
+  }, { root: strip, rootMargin: '220px 700px', threshold: 0.01 });
+
+  strip.querySelectorAll('.thumb-item[data-page]').forEach(observeThumbItem);
 }
 
 function renderDocumentThumbs(thumbs, pages) {
   const strip = document.querySelector('.thumb-strip');
   if (!strip) return;
+  resetThumbLazyState();
   strip.innerHTML = '';
+
+  const safePages = Math.max(0, Number(pages) || 0);
+  const thumbByPage = new Map();
   (thumbs || []).forEach((thumb, index) => {
-    const page = Number(thumb.page) || index + 1;
-    const item = document.createElement('div');
-    item.className = 'thumb-item' + (page === currentDocument.page ? ' on' : '');
-    item.dataset.page = String(page);
-
-    const frame = document.createElement('div');
-    frame.className = 'thumb-frame';
-    if (thumb.image) {
-      const img = document.createElement('img');
-      img.className = 'thumb-img';
-      img.alt = `Страница ${page}`;
-      img.src = thumb.image;
-      frame.appendChild(img);
-    } else {
-      const lines = document.createElement('div');
-      lines.className = 'thumb-lines';
-      lines.innerHTML = '<div class="tl h"></div><div class="tl d"></div><div class="tl"></div><div class="tl s"></div><div class="tl d"></div><div class="tl"></div>';
-      frame.appendChild(lines);
-    }
-    const dot = document.createElement('div');
-    dot.className = `thumb-dot ${thumbStatusClass(pageThumbStatus(page))}`;
-    frame.appendChild(dot);
-
-    const num = document.createElement('div');
-    num.className = 'thumb-num';
-    num.textContent = String(page);
-
-    item.appendChild(frame);
-    item.appendChild(num);
-    item.addEventListener('click', () => {
-      setActiveThumb(page);
-      updatePageChrome(page, currentDocument.pages, currentDocument.color, currentDocument.name);
-      if (window.crystalUI && window.crystalUI.bridge) window.crystalUI.bridge.renderPage(page);
-    });
-    strip.appendChild(item);
+    const page = Math.max(1, Math.min(Number(thumb.page) || index + 1, Math.max(1, safePages)));
+    if (thumb.image) thumbByPage.set(page, thumb.image);
   });
 
-  if (Number(pages) > (thumbs || []).length) {
-    const more = document.createElement('div');
-    more.className = 'thumb-item';
-    const box = document.createElement('div');
-    box.className = 'thumb-more';
-    box.textContent = `+${Number(pages) - (thumbs || []).length}`;
-    more.appendChild(box);
-    const label = document.createElement('div');
-    label.className = 'thumb-num';
-    label.textContent = 'ещё';
-    more.appendChild(label);
-    strip.appendChild(more);
+  const fragment = document.createDocumentFragment();
+  for (let page = 1; page <= safePages; page++) {
+    fragment.appendChild(createThumbItem(page, thumbByPage.get(page) || ''));
   }
+  strip.appendChild(fragment);
+  setupThumbLazyLoading();
+  requestThumbWindow(currentDocument.page, 18);
+  requestAnimationFrame(scrollActiveThumbIntoView);
+}
+
+function updateThumbImages(thumbs) {
+  (thumbs || []).forEach(thumb => {
+    const page = Number(thumb.page);
+    if (!Number.isFinite(page) || !thumb.image) return;
+    const item = document.querySelector(`.thumb-item[data-page="${page}"]`);
+    const frame = item?.querySelector('.thumb-frame');
+    if (!frame) return;
+    frame.querySelectorAll('.thumb-lines,.thumb-img').forEach(node => node.remove());
+    const img = document.createElement('img');
+    img.className = 'thumb-img';
+    img.alt = `Страница ${page}`;
+    img.src = thumb.image;
+    frame.insertBefore(img, frame.firstChild);
+    item.dataset.thumbLoaded = '1';
+    loadedThumbPages.add(page);
+    requestedThumbPages.delete(page);
+    queuedThumbPages.delete(page);
+    if (thumbObserver) thumbObserver.unobserve(item);
+  });
 }
 
 function pagePoint(event) {
@@ -1877,8 +2234,10 @@ function bindCanvasTools() {
       panX: state.panX,
       panY: state.panY,
       eraserSize: currentTool === 'eraser' ? currentEraserSize() : 0,
+      splitOrientation: isSplitTool(currentTool) ? splitOrientationFromTool(currentTool) : '',
       previousState: cloneState(state),
-      erased: false
+      erased: false,
+      splitChanged: false
     };
 
     if (currentTool === 'eraser' && point) {
@@ -1886,6 +2245,8 @@ function bindCanvasTools() {
       appendEraserPoint(state, point, drag.eraserSize);
       drag.erased = true;
       renderOverlays();
+    } else if (isSplitTool(currentTool) && point) {
+      drag.splitChanged = updateSplitLineFromPoint(point, drag.splitOrientation);
     }
   });
 
@@ -1912,6 +2273,11 @@ function bindCanvasTools() {
       return;
     }
 
+    if (isSplitTool(drag.tool)) {
+      drag.splitChanged = updateSplitLineFromPoint(point, drag.splitOrientation) || drag.splitChanged;
+      return;
+    }
+
     if (drag.tool === 'crop' || drag.tool === 'protect') {
       setDraftBox(clampRect(drag.startPoint, point), drag.tool);
     }
@@ -1930,6 +2296,16 @@ function bindCanvasTools() {
         addEraserSegment(drag, point);
       }
       finishEraserStroke(drag);
+    } else if (isSplitTool(drag.tool)) {
+      const point = pagePoint(event);
+      if (point) {
+        drag.splitChanged = updateSplitLineFromPoint(point, drag.splitOrientation) || drag.splitChanged;
+      }
+      if (drag.splitChanged) {
+        pushUndo({ type: 'state', page: pageKey(), previous: drag.previousState, next: cloneState(getPageState()) });
+        setEdits(currentDocument.edits + 1);
+        syncPageEdits();
+      }
     } else if (drag.tool === 'crop' || drag.tool === 'protect') {
       const point = pagePoint(event);
       if (point && drag.startPoint) {
@@ -1949,6 +2325,11 @@ function bindCanvasTools() {
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     } catch (_err) {}
     if (drag?.tool === 'eraser') finishEraserStroke(drag);
+    if (drag && isSplitTool(drag.tool) && drag.splitChanged) {
+      pushUndo({ type: 'state', page: pageKey(), previous: drag.previousState, next: cloneState(getPageState()) });
+      setEdits(currentDocument.edits + 1);
+      syncPageEdits();
+    }
     drag = null;
     clearDraftBox();
   });
@@ -1967,9 +2348,12 @@ function bindCanvasTools() {
 function goToPage(page) {
   const next = Math.max(1, Math.min(Number(page) || 1, Math.max(1, currentDocument.pages || 1)));
   if (next === currentDocument.page) return;
+  syncPageEdits(currentDocument.page);
   currentDocument.page = next;
   setActiveThumb(next);
   updatePageChrome(next, currentDocument.pages, currentDocument.color, currentDocument.name);
+  requestThumbWindow(next, 12);
+  requestAnimationFrame(scrollActiveThumbIntoView);
   if (window.crystalUI?.bridge) window.crystalUI.bridge.renderPage(next);
 }
 
@@ -1978,13 +2362,13 @@ function undoAction() {
   if (!action) return;
   const state = getPageState(action.page);
   if (action.type === 'overlay') {
-    const index = state.overlays.lastIndexOf(action.overlay);
+    const index = findOverlayIndex(state.overlays, action.overlay);
     if (index >= 0) state.overlays.splice(index, 1);
-    redoStack.push(action);
+    redoStack.push(cloneHistoryAction(action));
     setEdits(currentDocument.edits - 1);
   } else if (action.type === 'state') {
-    pageStates.set(String(action.page), action.previous);
-    redoStack.push(action);
+    restorePageSnapshot(action.page, action.previous);
+    redoStack.push(cloneHistoryAction(action));
     setEdits(currentDocument.edits - 1);
   }
   applyPageState();
@@ -1996,12 +2380,12 @@ function redoAction() {
   if (!action) return;
   const state = getPageState(action.page);
   if (action.type === 'overlay') {
-    state.overlays.push(action.overlay);
-    undoStack.push(action);
+    state.overlays.push(cloneOverlay(action.overlay));
+    undoStack.push(cloneHistoryAction(action));
     setEdits(currentDocument.edits + 1);
   } else if (action.type === 'state') {
-    pageStates.set(String(action.page), action.next);
-    undoStack.push(action);
+    restorePageSnapshot(action.page, action.next);
+    undoStack.push(cloneHistoryAction(action));
     setEdits(currentDocument.edits + 1);
   }
   applyPageState();
@@ -2062,6 +2446,226 @@ bindCanvasTools();
 bindStaticControls();
 setTool('pan');
 
+/* ─── Guided tutorial ─── */
+const TOUR_STEPS = [
+  {
+    target: '[data-tour="import-pdf"]',
+    point: 'left',
+    title: 'Импорт PDF',
+    text: 'Откройте PDF со сканами. После импорта появятся превью страниц, миниатюры и доступ к очистке.'
+  },
+  {
+    target: '[data-tour="mode"]',
+    point: 'left',
+    title: 'Режим очистки',
+    text: 'Выберите силу обработки. Стандартный режим подходит чаще всего, агрессивный сильнее удаляет шум.'
+  },
+  {
+    target: '[data-tour="range"]',
+    point: 'left',
+    title: 'Диапазон страниц',
+    text: 'Введите только нужные страницы, например 2-7. Тогда вне диапазона страницы копируются без рендера и очистки.'
+  },
+  {
+    target: '[data-tour="tuning"]',
+    point: 'left',
+    title: 'Тонкая настройка',
+    text: 'Ползунки управляют шумом, точками, яркостью, контрастом и зоной краёв. Кнопка рядом со значением сбрасывает параметр.'
+  },
+  {
+    target: '[data-tour="page-tools"]',
+    point: 'left',
+    title: 'Текущая страница',
+    text: 'Здесь операции над одной страницей: добавить, пропустить, скачать, удалить, настроить ластик и линии разделения.'
+  },
+  {
+    target: '[data-tour="split-vertical"]',
+    point: 'left',
+    title: 'Лев/прав',
+    text: 'Ставит вертикальную линию. Перетащите её на нужное место и нажмите красную «Обрезать», чтобы разрезать страницу на левую и правую.'
+  },
+  {
+    target: '[data-tour="split-horizontal"]',
+    point: 'left',
+    title: 'Верх/низ',
+    text: 'Ставит горизонтальную линию. Перетащите её и нажмите красную «Обрезать», чтобы получить верхнюю и нижнюю части.'
+  },
+  {
+    target: '[data-tour="split-apply"]',
+    point: 'left',
+    title: 'Обрезать',
+    text: 'Применяет видимую линию сразу к текущей странице: страница заменится двумя новыми страницами в PDF.'
+  },
+  {
+    target: '[data-tour="toolbar"]',
+    point: 'up',
+    title: 'Инструменты',
+    text: 'Рука двигает страницу, ластик стирает круглой кистью, обрезка задаёт видимую область, защита сохраняет цветной фрагмент.'
+  },
+  {
+    target: '[data-tour="canvas"]',
+    point: 'down',
+    title: 'Рабочая область',
+    text: 'Все ручные правки делаются прямо на странице. Масштаб меняется кнопками плюс/минус или колесом в режиме Рука.'
+  },
+  {
+    target: '[data-tour="thumbs"]',
+    point: 'down',
+    title: 'Миниатюры',
+    text: 'Переходите между страницами и смотрите статус обработки: ожидание, работа, готово, ошибка или не чистить.'
+  },
+  {
+    target: '[data-tour="start-cleaning"]',
+    point: 'left',
+    title: 'Запуск очистки',
+    text: 'Нажмите запуск. Если указан диапазон, обновятся только выбранные страницы, остальные будут скопированы без обработки.'
+  },
+  {
+    target: '[data-tour="export-pdf"]',
+    point: 'left',
+    title: 'Экспорт',
+    text: 'После обработки сохраните готовый PDF. Кнопка экспорта активна, когда документ импортирован или результат уже готов.'
+  }
+];
+let tourIndex = 0;
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function currentTourElements() {
+  return {
+    layer: document.querySelector('.tour-layer'),
+    focus: document.querySelector('.tour-focus'),
+    arrow: document.querySelector('.tour-arrow'),
+    title: document.querySelector('.tour-title'),
+    text: document.querySelector('.tour-text'),
+    step: document.querySelector('.tour-step'),
+    prev: document.querySelector('[data-tour-action="prev"]'),
+    next: document.querySelector('[data-tour-action="next"]')
+  };
+}
+
+function targetRectForStep(step) {
+  const target = document.querySelector(step.target);
+  if (!target) {
+    return { left: window.innerWidth - 92, top: 14, width: 72, height: 34, right: window.innerWidth - 20, bottom: 48 };
+  }
+  target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'auto' });
+  return target.getBoundingClientRect();
+}
+
+function positionTourArrow(arrow, rect, point) {
+  const width = Math.min(370, window.innerWidth - 32);
+  const height = Math.max(118, arrow.offsetHeight || 118);
+  const gap = 22;
+  let left = rect.left - width - gap;
+  let top = rect.top + rect.height / 2 - height / 2;
+
+  if (point === 'left') {
+    left = rect.right + gap;
+  } else if (point === 'up') {
+    left = rect.left + rect.width / 2 - width / 2;
+    top = rect.bottom + gap;
+  } else if (point === 'down') {
+    left = rect.left + rect.width / 2 - width / 2;
+    top = rect.top - height - gap;
+  }
+
+  arrow.dataset.point = point || 'right';
+  arrow.style.left = `${clampNumber(left, 16, window.innerWidth - width - 16)}px`;
+  arrow.style.top = `${clampNumber(top, 14, window.innerHeight - height - 14)}px`;
+}
+
+function updateTourShades(focusRect) {
+  const shades = {
+    top: document.querySelector('.tour-shade-top'),
+    bottom: document.querySelector('.tour-shade-bottom'),
+    left: document.querySelector('.tour-shade-left'),
+    right: document.querySelector('.tour-shade-right')
+  };
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+  const x = Math.max(0, focusRect.left);
+  const y = Math.max(0, focusRect.top);
+  const w = Math.max(0, Math.min(focusRect.width, winW - x));
+  const h = Math.max(0, Math.min(focusRect.height, winH - y));
+
+  if (shades.top) Object.assign(shades.top.style, { left: '0px', top: '0px', width: `${winW}px`, height: `${y}px` });
+  if (shades.bottom) Object.assign(shades.bottom.style, { left: '0px', top: `${y + h}px`, width: `${winW}px`, height: `${Math.max(0, winH - y - h)}px` });
+  if (shades.left) Object.assign(shades.left.style, { left: '0px', top: `${y}px`, width: `${x}px`, height: `${h}px` });
+  if (shades.right) Object.assign(shades.right.style, { left: `${x + w}px`, top: `${y}px`, width: `${Math.max(0, winW - x - w)}px`, height: `${h}px` });
+}
+
+function showTourStep(index) {
+  const els = currentTourElements();
+  if (!els.layer || !els.focus || !els.arrow) return;
+  tourIndex = clampNumber(index, 0, TOUR_STEPS.length - 1);
+  const step = TOUR_STEPS[tourIndex];
+  const rect = targetRectForStep(step);
+  const pad = 8;
+  const focusLeft = clampNumber(rect.left - pad, 8, window.innerWidth - 36);
+  const focusTop = clampNumber(rect.top - pad, 8, window.innerHeight - 36);
+  const focusRect = {
+    left: focusLeft,
+    top: focusTop,
+    width: Math.max(28, Math.min(rect.width + pad * 2, window.innerWidth - focusLeft - 8)),
+    height: Math.max(28, Math.min(rect.height + pad * 2, window.innerHeight - focusTop - 8))
+  };
+
+  els.layer.classList.add('on');
+  els.layer.setAttribute('aria-hidden', 'false');
+  els.focus.style.left = `${focusRect.left}px`;
+  els.focus.style.top = `${focusRect.top}px`;
+  els.focus.style.width = `${focusRect.width}px`;
+  els.focus.style.height = `${focusRect.height}px`;
+  updateTourShades(focusRect);
+  if (els.title) els.title.textContent = step.title;
+  if (els.text) els.text.textContent = step.text;
+  if (els.step) els.step.textContent = `${tourIndex + 1}/${TOUR_STEPS.length}`;
+  if (els.prev) els.prev.disabled = tourIndex === 0;
+  if (els.next) els.next.textContent = tourIndex === TOUR_STEPS.length - 1 ? 'Готово' : 'Дальше';
+  positionTourArrow(els.arrow, rect, step.point || 'right');
+}
+
+function closeTour() {
+  const layer = document.querySelector('.tour-layer');
+  if (!layer) return;
+  layer.classList.remove('on');
+  layer.setAttribute('aria-hidden', 'true');
+}
+
+function startTour() {
+  showTourStep(0);
+}
+
+function bindTourControls() {
+  const launch = document.querySelector('.tutorial-launch');
+  if (launch) launch.addEventListener('click', startTour);
+  document.querySelectorAll('[data-tour-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.tourAction;
+      if (action === 'close') closeTour();
+      else if (action === 'prev') showTourStep(tourIndex - 1);
+      else if (action === 'next') {
+        if (tourIndex >= TOUR_STEPS.length - 1) closeTour();
+        else showTourStep(tourIndex + 1);
+      }
+    });
+  });
+  const scrim = document.querySelector('.tour-scrim');
+  if (scrim) scrim.addEventListener('click', closeTour);
+  window.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeTour();
+  });
+  window.addEventListener('resize', () => {
+    const layer = document.querySelector('.tour-layer');
+    if (layer?.classList.contains('on')) showTourStep(tourIndex);
+  });
+}
+
+bindTourControls();
+
 /* ─── Native PySide6 bridge ─── */
 window.crystalUI = {
   bridge: null,
@@ -2112,6 +2716,17 @@ window.crystalUI = {
     renderDocumentThumbs(thumbs || [], currentDocument.pages);
     applyActionLocks();
     syncAllPageEdits();
+  },
+  updateProcessedPages(name, pages, color, preview, thumbs, activePage=1) {
+    this.setFile(name);
+    this.setStats(pages, color, 0, 0);
+    pageStates.clear();
+    undoStack.length = 0;
+    redoStack.length = 0;
+    currentDocument = { name: name || 'PDF', pages: Number(pages) || 0, color: Number(color) || 0, page: Number(activePage) || 1, edits: 0, zoom: currentDocument.zoom || 1 };
+    showPagePreview(currentDocument.page, currentDocument.pages, currentDocument.color, currentDocument.name, preview);
+    updateThumbImages(thumbs || []);
+    applyActionLocks();
   },
   setPagePreview(page, pages, color, name, preview) {
     showPagePreview(page, pages, color, name, preview);
@@ -2169,7 +2784,20 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
 
     document.querySelectorAll('.btn').forEach(btn => {
       const text = btn.textContent.replace(/\s+/g, ' ').trim();
-      if (text.includes('Импорт PDF')) btn.addEventListener('click', () => bridge.importPdf());
+      const action = btn.dataset.action || '';
+      if (action === 'split-vertical') btn.addEventListener('click', () => {
+        startSplitLine('vertical');
+      });
+      else if (action === 'split-horizontal') btn.addEventListener('click', () => {
+        startSplitLine('horizontal');
+      });
+      else if (action === 'apply-split-crop') btn.addEventListener('click', () => {
+        if (btn.disabled || processingActive) return;
+        const page = Number(currentDocument.page) || 1;
+        const payload = JSON.stringify(serializablePageState(page));
+        if (bridge.applySplitCrop) bridge.applySplitCrop(page, payload);
+      });
+      else if (text.includes('Импорт PDF')) btn.addEventListener('click', () => bridge.importPdf());
       else if (text.includes('Экспорт PDF')) btn.addEventListener('click', () => {
         if (btn.disabled) return;
         syncAllPageEdits();
@@ -2186,12 +2814,10 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
       });
       else if (text.includes('Удалить текущую')) btn.addEventListener('click', () => bridge.deleteCurrentPage());
       else if (text.includes('Линия лев/прав')) btn.addEventListener('click', () => {
-        setTool('crop');
-        window.crystalUI.setStatus('● Потяните область по ширине страницы', 'ready');
+        startSplitLine('vertical');
       });
       else if (text.includes('Линия верх/низ')) btn.addEventListener('click', () => {
-        setTool('crop');
-        window.crystalUI.setStatus('● Потяните область по высоте страницы', 'ready');
+        startSplitLine('horizontal');
       });
     });
 

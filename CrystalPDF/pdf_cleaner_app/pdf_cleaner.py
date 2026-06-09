@@ -25,7 +25,7 @@ class CleanSettings:
     brightness: int = 0
     contrast: int = 100
     clean_edges: bool = True
-    edge_margin: int = 5
+    edge_margin: int = 0
     edge_threshold: int = 60
     deskew: bool = True
     max_angle: float = 8.0
@@ -249,7 +249,7 @@ def _remove_speckles(binary: np.ndarray, settings: CleanSettings) -> np.ndarray:
     area_limit = max(4, int(settings.dot_area))
     max_dim = max(5, int(np.sqrt(area_limit) * 3.0))
     margin = min(max(settings.edge_margin, 0), h // 5, w // 5)
-    edge_dot_margin = min(max(12, (margin * 2) // 3), 32)
+    edge_dot_margin = 0 if margin <= 0 else min(max(12, (margin * 2) // 3), 32)
     text_bands = _detect_text_bands(inv)
 
     for idx in range(1, num_labels):
@@ -440,6 +440,8 @@ def edge_artifact_mask(dark_mask: np.ndarray, margin: int, sensitivity: int = 60
 def _clean_edges(binary: np.ndarray, margin: int, dark_threshold: int = 60) -> np.ndarray:
     h, w = binary.shape[:2]
     result = binary.copy()
+    if int(margin) <= 0:
+        return result
     margin = min(max(1, int(margin)), max(1, min(h, w) // 3))
 
     black = binary == 0
