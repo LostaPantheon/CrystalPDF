@@ -60,6 +60,17 @@ CLEAN_PROGRESS_RE = re.compile(
 LEGACY_DESKTOP_SHORTCUT_NAMES = ("CrystalPDF", "Mini_Icon_CrystalPDF")
 DESKTOP_SHORTCUT_NEVER_ASK_SETTING = "desktop_shortcut_never_ask"
 LEGACY_DESKTOP_SHORTCUT_PROMPT_DISABLED_SETTING = "desktop_shortcut_prompt_disabled"
+MAX_OUTPUT_PATH_CHARS = 230
+MAX_OUTPUT_STEM_CHARS = 80
+GENERATED_STEM_SUFFIXES = (
+    re.compile(r"_cut_page_\d+(?:_CrystalPDF)?$", re.IGNORECASE),
+    re.compile(r"_merged_pages_\d+_\d+(?:_CrystalPDF)?$", re.IGNORECASE),
+    re.compile(r"_without_page_\d+$", re.IGNORECASE),
+    re.compile(r"_plus_pages(?:_CrystalPDF)?$", re.IGNORECASE),
+    re.compile(r"_rotated(?:_CrystalPDF)?$", re.IGNORECASE),
+    re.compile(r"_clean$", re.IGNORECASE),
+    re.compile(r"_CrystalPDF(?:_\d+)?$", re.IGNORECASE),
+)
 
 
 def resource_path(relative: str) -> Path:
@@ -90,9 +101,47 @@ def downloads_dir() -> Path:
     return downloads if downloads.exists() else Path.home()
 
 
+def safe_file_stem(value: object, max_chars: int = MAX_OUTPUT_STEM_CHARS) -> str:
+    text = str(value or "CrystalPDF")
+    text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+    text = re.sub(r"\s+", " ", text).strip(" ._")
+    if not text:
+        text = "CrystalPDF"
+    return text[:max_chars].rstrip(" ._") or "CrystalPDF"
+
+
+def base_document_stem(path: Path | None) -> str:
+    stem = (path.stem if path else "scan") or "scan"
+    previous = None
+    while stem and stem != previous:
+        previous = stem
+        for pattern in GENERATED_STEM_SUFFIXES:
+            stem = pattern.sub("", stem)
+    return safe_file_stem(stem or (path.stem if path else "scan"))
+
+
+def bounded_output_path(directory: Path, stem: str, suffix: str) -> Path:
+    safe_stem = safe_file_stem(stem)
+    safe_suffix = safe_file_stem(suffix, 120)
+
+    def build(candidate_stem: str) -> Path:
+        return directory / f"{candidate_stem}_{safe_suffix}.pdf"
+
+    path = build(safe_stem)
+    if len(str(path)) <= MAX_OUTPUT_PATH_CHARS:
+        return path
+
+    overhead = len(str(directory)) + len(safe_suffix) + len(".pdf") + 2
+    keep = max(12, min(len(safe_stem), MAX_OUTPUT_PATH_CHARS - overhead))
+    return build(safe_stem[:keep].rstrip(" ._") or "CrystalPDF")
+
+
+def generated_output_path(input_path: Path | None, suffix: str) -> Path:
+    return bounded_output_path(downloads_dir(), base_document_stem(input_path), suffix)
+
+
 def default_output_path(input_path: Path | None) -> Path:
-    source = input_path or Path("scan.pdf")
-    return downloads_dir() / f"{source.stem}_CrystalPDF.pdf"
+    return generated_output_path(input_path or Path("scan.pdf"), "CrystalPDF")
 
 
 def unique_output_path(output_path: Path) -> Path:
@@ -279,21 +328,26 @@ def initial_thumb_pages(active_page: int, total: int) -> list[int]:
 def thumbnail_payload(doc: fitz.Document, pages: list[int] | set[int] | tuple[int, ...]) -> list[dict[str, object]]:
     total = len(doc)
     thumbs: list[dict[str, object]] = []
-    requested_pages: set[int] = set()
+    requested_pages: list[int] = []
+    seen_pages: set[int] = set()
     for page in pages:
         try:
             page_number = int(page)
         except (TypeError, ValueError):
             continue
-        if 1 <= page_number <= total:
-            requested_pages.add(page_number)
-    for page_number in sorted(requested_pages):
-        thumbs.append(
-            {
-                "page": page_number,
-                "image": page_png_data_url(doc.load_page(page_number - 1), 120, 170),
-            }
-        )
+        if 1 <= page_number <= total and page_number not in seen_pages:
+            requested_pages.append(page_number)
+            seen_pages.add(page_number)
+    for page_number in requested_pages:
+        try:
+            thumbs.append(
+                {
+                    "page": page_number,
+                    "image": page_png_data_url(doc.load_page(page_number - 1), 120, 170),
+                }
+            )
+        except Exception:
+            continue
     return thumbs
 
 
@@ -558,15 +612,10 @@ def image_page_rect(image: Image.Image) -> fitz.Rect:
     return fitz.Rect(0, 0, image.width * 72.0 / DEFAULT_DPI, image.height * 72.0 / DEFAULT_DPI)
 
 
-def split_page_images(image: Image.Image, page_edits: dict[str, object] | None) -> list[Image.Image]:
-    splits = page_edit_overlays(page_edits, "split")
-    if not splits:
-        return [image]
-
-    split = splits[-1]
-    orientation = str(split.get("orientation", "")).lower()
-    position = max(2.0, min(98.0, clamp_pct(split.get("pos"), 50.0)))
+def split_image_at(image: Image.Image, orientation: str, position: float = 50.0) -> list[Image.Image]:
     width, height = image.size
+    orientation = orientation.lower()
+    position = max(2.0, min(98.0, float(position)))
 
     if orientation == "vertical" and width >= 4:
         x = max(1, min(width - 1, int(round(width * position / 100.0))))
@@ -575,6 +624,30 @@ def split_page_images(image: Image.Image, page_edits: dict[str, object] | None) 
     if orientation == "horizontal" and height >= 4:
         y = max(1, min(height - 1, int(round(height * position / 100.0))))
         return [image.crop((0, 0, width, y)), image.crop((0, y, width, height))]
+
+    return [image]
+
+
+def auto_split_page_images(image: Image.Image) -> list[Image.Image]:
+    width, height = image.size
+    orientation = "vertical" if width >= height else "horizontal"
+    return split_image_at(image, orientation, 50.0)
+
+
+def split_page_images(
+    image: Image.Image,
+    page_edits: dict[str, object] | None,
+    auto_split: bool = False,
+) -> list[Image.Image]:
+    splits = page_edit_overlays(page_edits, "split")
+    if splits:
+        split = splits[-1]
+        orientation = str(split.get("orientation", "")).lower()
+        position = max(2.0, min(98.0, clamp_pct(split.get("pos"), 50.0)))
+        return split_image_at(image, orientation, position)
+
+    if auto_split:
+        return auto_split_page_images(image)
 
     return [image]
 
@@ -711,8 +784,9 @@ def insert_edited_pages(
     options: UiOptions,
     color: bool,
     compress: bool | None = None,
+    auto_split: bool = False,
 ) -> None:
-    for page_image in split_page_images(image, edits):
+    for page_image in split_page_images(image, edits, auto_split=auto_split):
         insert_pil_page(
             target,
             image_page_rect(page_image),
@@ -753,7 +827,7 @@ def clean_pdf_webengine(
             page = source.load_page(idx)
             edits = page_edits.get(page_num, {}) if page_edits else {}
             in_clean_range = page_num in clean_pages
-            if explicit_clean_range and not in_clean_range:
+            if explicit_clean_range and not in_clean_range and not options.split_pages:
                 target.insert_pdf(source, from_page=idx, to_page=idx)
                 progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · вне диапазона")
                 continue
@@ -766,7 +840,7 @@ def clean_pdf_webengine(
             )
             has_page_edits = has_page_visual_edits(edits)
             protected_boxes = page_edit_overlays(edits, "protect")
-            if skip and not has_page_edits:
+            if skip and not has_page_edits and not options.split_pages:
                 if options.compress_pdf and options.compression_scope_kind() in {"all", "color"}:
                     progress(pct, f"Стр. {page_num}/{total} · сжатие")
                     rgb = render_page_rgb(page, DEFAULT_DPI)
@@ -802,6 +876,7 @@ def clean_pdf_webengine(
                     options,
                     color=is_color,
                     compress=options.should_compress_page(color=is_color, processed=False),
+                    auto_split=options.split_pages,
                 )
                 processed_count += 1
                 progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
@@ -820,6 +895,7 @@ def clean_pdf_webengine(
                     options,
                     color=True,
                     compress=options.should_compress_page(color=True, processed=True),
+                    auto_split=options.split_pages,
                 )
             else:
                 progress(pct, f"Стр. {page_num}/{total} · шумоподавление")
@@ -838,6 +914,7 @@ def clean_pdf_webengine(
                     options,
                     color=out_img.mode == "RGB",
                     compress=options.should_compress_page(color=out_img.mode == "RGB", processed=True),
+                    auto_split=options.split_pages,
                 )
             processed_count += 1
             progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
@@ -1150,7 +1227,7 @@ class CrystalPdfQtApp(QMainWindow):
         self.page_edits: dict[int, dict[str, object]] = {}
         self.pending_clean_pages: set[int] = set()
         self.pending_clean_range_explicit = False
-        self.pending_thumb_pages: set[int] = set()
+        self.pending_thumb_pages: list[int] = []
         self.worker: PdfLoadWorker | PdfPartialRefreshWorker | CleanWorker | ImageImportWorker | None = None
         self.thumb_worker: PdfThumbWorker | None = None
 
@@ -1185,8 +1262,6 @@ class CrystalPdfQtApp(QMainWindow):
         self.pending_thumb_pages.clear()
 
     def request_thumbnails(self, payload: str) -> None:
-        if not self.input_path or self.is_busy():
-            return
         try:
             raw_pages = json.loads(payload) if payload else []
         except Exception:
@@ -1194,18 +1269,21 @@ class CrystalPdfQtApp(QMainWindow):
         if not isinstance(raw_pages, list):
             return
 
-        pages: set[int] = set()
+        pages: list[int] = []
+        seen: set[int] = set()
         for item in raw_pages:
             try:
                 page = int(item)
             except (TypeError, ValueError):
                 continue
-            if 1 <= page <= self.page_count:
-                pages.add(page)
+            if 1 <= page <= self.page_count and page not in seen:
+                pages.append(page)
+                seen.add(page)
         if not pages:
             return
 
-        self.pending_thumb_pages.update(pages)
+        existing = [page for page in self.pending_thumb_pages if page not in seen]
+        self.pending_thumb_pages = pages + existing
         self.start_next_thumb_worker()
 
     def start_next_thumb_worker(self) -> None:
@@ -1216,8 +1294,8 @@ class CrystalPdfQtApp(QMainWindow):
         if not self.pending_thumb_pages:
             return
 
-        pages = set(sorted(self.pending_thumb_pages)[:THUMB_BATCH_SIZE])
-        self.pending_thumb_pages.difference_update(pages)
+        pages = self.pending_thumb_pages[:THUMB_BATCH_SIZE]
+        del self.pending_thumb_pages[:THUMB_BATCH_SIZE]
         worker = PdfThumbWorker(self.input_path, pages)
         self.thumb_worker = worker
         worker.finished_ok.connect(self.on_thumbnails_loaded)
@@ -1250,6 +1328,8 @@ class CrystalPdfQtApp(QMainWindow):
             self.ui_call("setAllPageStatuses", "ok")
 
     def can_partially_refresh_clean_result(self) -> bool:
+        if self.options.split_pages:
+            return False
         if not self.pending_clean_range_explicit or not self.pending_clean_pages:
             return False
         if self.page_count <= 0 or len(self.pending_clean_pages) >= self.page_count:
@@ -1564,7 +1644,7 @@ class CrystalPdfQtApp(QMainWindow):
         if not folder:
             return
         folder_path = Path(folder)
-        out = unique_output_path(downloads_dir() / f"{folder_path.name}_CrystalPDF.pdf")
+        out = unique_output_path(bounded_output_path(downloads_dir(), folder_path.name, "CrystalPDF"))
         self.ui_call("setProcessing", True, "Импорт сканов")
         self.ui_call("setProgress", 0, "Импорт изображений")
         self.ui_call("setStatus", "Импорт изображений", "working")
@@ -1739,8 +1819,8 @@ class CrystalPdfQtApp(QMainWindow):
             return
 
         source_path = self.last_output_path
-        default_stem = (self.input_path or source_path or Path("scan")).stem
-        default_name = downloads_dir() / f"{default_stem}_page_{self.current_page}.pdf"
+        default_stem = base_document_stem(self.input_path or source_path or Path("scan"))
+        default_name = bounded_output_path(downloads_dir(), default_stem, f"page_{self.current_page}")
         target, _ = QFileDialog.getSaveFileName(
             self,
             "Скачать текущую страницу",
@@ -1789,8 +1869,7 @@ class CrystalPdfQtApp(QMainWindow):
             self.load_pdf(first_incoming)
             return
 
-        base_stem = (self.input_path or first_incoming).stem
-        output = unique_output_path(downloads_dir() / f"{base_stem}_plus_pages_CrystalPDF.pdf")
+        output = unique_output_path(generated_output_path(self.input_path or first_incoming, "plus_pages_CrystalPDF"))
         try:
             result = fitz.open()
             try:
@@ -1831,7 +1910,7 @@ class CrystalPdfQtApp(QMainWindow):
             return
 
         deleted_page = self.current_page
-        output = unique_output_path(downloads_dir() / f"{self.input_path.stem}_without_page_{deleted_page}.pdf")
+        output = unique_output_path(generated_output_path(self.input_path, f"without_page_{deleted_page}"))
         try:
             source = fitz.open(str(self.input_path))
             result = fitz.open()
@@ -1891,7 +1970,7 @@ class CrystalPdfQtApp(QMainWindow):
             return
         first_page, second_page = pair
         output = unique_output_path(
-            downloads_dir() / f"{self.input_path.stem}_merged_pages_{first_page}_{second_page}_CrystalPDF.pdf"
+            generated_output_path(self.input_path, f"merged_pages_{first_page}_{second_page}_CrystalPDF")
         )
 
         self.ui_call("setProcessing", True, "Склейка страниц")
@@ -1959,7 +2038,7 @@ class CrystalPdfQtApp(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "Сначала поставьте линию лев/прав или верх/низ.")
             return
 
-        output = unique_output_path(downloads_dir() / f"{self.input_path.stem}_cut_page_{page_number}_CrystalPDF.pdf")
+        output = unique_output_path(generated_output_path(self.input_path, f"cut_page_{page_number}_CrystalPDF"))
         self.current_page = page_number
         self.ui_call("setProcessing", True, "Обрезка страницы")
         self.ui_call("setProgress", 0, f"Обрезка страницы {page_number}")
@@ -2009,7 +2088,7 @@ class CrystalPdfQtApp(QMainWindow):
             QMessageBox.information(self, APP_TITLE, "Сначала импортируйте PDF.")
             return
 
-        output = unique_output_path(downloads_dir() / f"{self.input_path.stem}_rotated_CrystalPDF.pdf")
+        output = unique_output_path(generated_output_path(self.input_path, "rotated_CrystalPDF"))
         try:
             doc = fitz.open(str(self.input_path))
             try:

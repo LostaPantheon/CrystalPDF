@@ -1250,13 +1250,15 @@ let pageStateFrame = 0;
 let lastEraserPoint = null;
 let thumbObserver = null;
 let thumbRequestTimer = 0;
+let thumbScrollTimer = 0;
 const pageStates = new Map();
 const undoStack = [];
 const redoStack = [];
 const loadedThumbPages = new Set();
-const requestedThumbPages = new Set();
+const requestedThumbPages = new Map();
 const queuedThumbPages = new Set();
 const THUMB_REQUEST_BATCH = 36;
+const THUMB_REQUEST_RETRY_MS = 4500;
 
 function buttonTextHas(btn, values) {
   const text = (btn?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -2097,9 +2099,34 @@ function resetThumbLazyState() {
     clearTimeout(thumbRequestTimer);
     thumbRequestTimer = 0;
   }
+  if (thumbScrollTimer) {
+    clearTimeout(thumbScrollTimer);
+    thumbScrollTimer = 0;
+  }
   loadedThumbPages.clear();
   requestedThumbPages.clear();
   queuedThumbPages.clear();
+}
+
+function thumbRequestPending(page) {
+  const requestedAt = requestedThumbPages.get(page);
+  if (!requestedAt) return false;
+  if (Date.now() - requestedAt > THUMB_REQUEST_RETRY_MS) {
+    requestedThumbPages.delete(page);
+    return false;
+  }
+  return true;
+}
+
+function primeLoadedThumbStateFromDom() {
+  document.querySelectorAll('.thumb-item[data-page]').forEach(item => {
+    const page = Number(item.dataset.page);
+    if (!Number.isFinite(page)) return;
+    if (item.querySelector('.thumb-img')) {
+      loadedThumbPages.add(page);
+      item.dataset.thumbLoaded = '1';
+    }
+  });
 }
 
 function createThumbItem(page, image='') {
@@ -2147,23 +2174,32 @@ function flushQueuedThumbRequests() {
   if (!queuedThumbPages.size || !window.crystalUI?.bridge?.renderThumbs) return;
   const pages = Array.from(queuedThumbPages)
     .filter(page => !loadedThumbPages.has(page))
-    .sort((a, b) => a - b)
     .slice(0, THUMB_REQUEST_BATCH);
   pages.forEach(page => queuedThumbPages.delete(page));
   if (!pages.length) return;
-  pages.forEach(page => requestedThumbPages.add(page));
+  const now = Date.now();
+  pages.forEach(page => requestedThumbPages.set(page, now));
   window.crystalUI.bridge.renderThumbs(JSON.stringify(pages));
   if (queuedThumbPages.size && !thumbRequestTimer) {
     thumbRequestTimer = setTimeout(flushQueuedThumbRequests, 90);
   }
 }
 
-function requestThumbPages(pages) {
+function requestThumbPages(pages, prioritize=false) {
+  const candidates = [];
   (pages || []).forEach(rawPage => {
     const page = Math.max(1, Math.min(Number(rawPage) || 1, Math.max(1, currentDocument.pages || 1)));
-    if (loadedThumbPages.has(page) || requestedThumbPages.has(page)) return;
-    queuedThumbPages.add(page);
+    if (loadedThumbPages.has(page) || thumbRequestPending(page)) return;
+    if (!candidates.includes(page)) candidates.push(page);
   });
+  if (prioritize && candidates.length) {
+    const rest = Array.from(queuedThumbPages).filter(page => !candidates.includes(page));
+    queuedThumbPages.clear();
+    candidates.forEach(page => queuedThumbPages.add(page));
+    rest.forEach(page => queuedThumbPages.add(page));
+  } else {
+    candidates.forEach(page => queuedThumbPages.add(page));
+  }
   if (queuedThumbPages.size && !thumbRequestTimer) {
     thumbRequestTimer = setTimeout(flushQueuedThumbRequests, 40);
   }
@@ -2171,11 +2207,42 @@ function requestThumbPages(pages) {
 
 function requestThumbWindow(centerPage=currentDocument.page, radius=18) {
   const center = Math.max(1, Math.min(Number(centerPage) || 1, Math.max(1, currentDocument.pages || 1)));
-  const start = Math.max(1, center - radius);
-  const end = Math.min(currentDocument.pages || 1, center + radius);
+  const pages = [center];
+  for (let offset = 1; offset <= radius; offset++) {
+    const before = center - offset;
+    const after = center + offset;
+    if (before >= 1) pages.push(before);
+    if (after <= (currentDocument.pages || 1)) pages.push(after);
+  }
+  requestThumbPages(pages, true);
+}
+
+function visibleThumbPages() {
+  const strip = document.querySelector('.thumb-strip');
+  if (!strip) return [];
+  const left = strip.scrollLeft - strip.clientWidth * 1.5;
+  const right = strip.scrollLeft + strip.clientWidth * 2.5;
   const pages = [];
-  for (let page = start; page <= end; page++) pages.push(page);
-  requestThumbPages(pages);
+  strip.querySelectorAll('.thumb-item[data-page]').forEach(item => {
+    const itemLeft = item.offsetLeft;
+    const itemRight = itemLeft + item.offsetWidth;
+    if (itemRight < left || itemLeft > right) return;
+    const page = Number(item.dataset.page);
+    if (Number.isFinite(page)) pages.push(page);
+  });
+  return pages;
+}
+
+function requestVisibleThumbs() {
+  requestThumbPages(visibleThumbPages(), true);
+}
+
+function scheduleVisibleThumbRequest() {
+  if (thumbScrollTimer) clearTimeout(thumbScrollTimer);
+  thumbScrollTimer = setTimeout(() => {
+    thumbScrollTimer = 0;
+    requestVisibleThumbs();
+  }, 80);
 }
 
 function observeThumbItem(item) {
@@ -2187,8 +2254,13 @@ function setupThumbLazyLoading() {
   if (thumbObserver) thumbObserver.disconnect();
   const strip = document.querySelector('.thumb-strip');
   if (!strip) return;
+  if (strip.dataset.thumbScrollBound !== '1') {
+    strip.dataset.thumbScrollBound = '1';
+    strip.addEventListener('scroll', scheduleVisibleThumbRequest, { passive: true });
+  }
   if (!('IntersectionObserver' in window)) {
     requestThumbWindow(currentDocument.page, 30);
+    requestAnimationFrame(requestVisibleThumbs);
     return;
   }
   thumbObserver = new IntersectionObserver(entries => {
@@ -2198,10 +2270,11 @@ function setupThumbLazyLoading() {
       const page = Number(entry.target.dataset.page);
       if (Number.isFinite(page)) pages.push(page);
     });
-    requestThumbPages(pages);
+    requestThumbPages(pages, true);
   }, { root: strip, rootMargin: '220px 700px', threshold: 0.01 });
 
   strip.querySelectorAll('.thumb-item[data-page]').forEach(observeThumbItem);
+  requestAnimationFrame(requestVisibleThumbs);
 }
 
 function renderDocumentThumbs(thumbs, pages) {
@@ -2227,7 +2300,7 @@ function renderDocumentThumbs(thumbs, pages) {
   requestAnimationFrame(scrollActiveThumbIntoView);
 }
 
-function updateThumbImages(thumbs) {
+function applyThumbImages(thumbs) {
   (thumbs || []).forEach(thumb => {
     const page = Number(thumb.page);
     if (!Number.isFinite(page) || !thumb.image) return;
@@ -2808,8 +2881,15 @@ window.crystalUI = {
     redoStack.length = 0;
     currentDocument = { name: name || 'PDF', pages: Number(pages) || 0, color: Number(color) || 0, page: Number(activePage) || 1, edits: 0, zoom: currentDocument.zoom || 1 };
     showPagePreview(currentDocument.page, currentDocument.pages, currentDocument.color, currentDocument.name, preview);
-    updateThumbImages(thumbs || []);
+    resetThumbLazyState();
+    applyThumbImages(thumbs || []);
+    primeLoadedThumbStateFromDom();
+    setupThumbLazyLoading();
+    requestThumbWindow(currentDocument.page, 18);
     applyActionLocks();
+  },
+  updateThumbImages(thumbs) {
+    applyThumbImages(thumbs || []);
   },
   setPagePreview(page, pages, color, name, preview) {
     showPagePreview(page, pages, color, name, preview);
