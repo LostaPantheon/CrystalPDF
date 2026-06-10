@@ -1257,7 +1257,8 @@ const redoStack = [];
 const loadedThumbPages = new Set();
 const requestedThumbPages = new Map();
 const queuedThumbPages = new Set();
-const THUMB_REQUEST_BATCH = 36;
+const THUMB_REQUEST_BATCH = 12;
+const THUMB_QUEUE_LIMIT = 96;
 const THUMB_REQUEST_RETRY_MS = 4500;
 
 function buttonTextHas(btn, values) {
@@ -2078,7 +2079,7 @@ function showPagePreview(page, pages, color, name, preview) {
   inner.appendChild(layer);
   updatePageChrome(currentDocument.page, currentDocument.pages, currentDocument.color, currentDocument.name);
   setActiveThumb(currentDocument.page);
-  requestThumbWindow(currentDocument.page, 12);
+  requestThumbWindow(currentDocument.page, 6);
   applyPageState();
 }
 
@@ -2141,6 +2142,8 @@ function createThumbItem(page, image='') {
     const img = document.createElement('img');
     img.className = 'thumb-img';
     img.alt = `Страница ${page}`;
+    img.decoding = 'async';
+    img.loading = 'lazy';
     img.src = image;
     frame.appendChild(img);
     item.dataset.thumbLoaded = '1';
@@ -2164,7 +2167,7 @@ function createThumbItem(page, image='') {
   item.appendChild(num);
   item.addEventListener('click', () => {
     goToPage(page);
-    requestThumbWindow(page, 12);
+    requestThumbWindow(page, 6);
   });
   return item;
 }
@@ -2185,6 +2188,13 @@ function flushQueuedThumbRequests() {
   }
 }
 
+function trimQueuedThumbPages() {
+  if (queuedThumbPages.size <= THUMB_QUEUE_LIMIT) return;
+  const keep = Array.from(queuedThumbPages).slice(0, THUMB_QUEUE_LIMIT);
+  queuedThumbPages.clear();
+  keep.forEach(page => queuedThumbPages.add(page));
+}
+
 function requestThumbPages(pages, prioritize=false) {
   const candidates = [];
   (pages || []).forEach(rawPage => {
@@ -2200,8 +2210,9 @@ function requestThumbPages(pages, prioritize=false) {
   } else {
     candidates.forEach(page => queuedThumbPages.add(page));
   }
+  trimQueuedThumbPages();
   if (queuedThumbPages.size && !thumbRequestTimer) {
-    thumbRequestTimer = setTimeout(flushQueuedThumbRequests, 40);
+    thumbRequestTimer = setTimeout(flushQueuedThumbRequests, 80);
   }
 }
 
@@ -2242,7 +2253,7 @@ function scheduleVisibleThumbRequest() {
   thumbScrollTimer = setTimeout(() => {
     thumbScrollTimer = 0;
     requestVisibleThumbs();
-  }, 80);
+  }, 160);
 }
 
 function observeThumbItem(item) {
@@ -2259,7 +2270,7 @@ function setupThumbLazyLoading() {
     strip.addEventListener('scroll', scheduleVisibleThumbRequest, { passive: true });
   }
   if (!('IntersectionObserver' in window)) {
-    requestThumbWindow(currentDocument.page, 30);
+    requestThumbWindow(currentDocument.page, 12);
     requestAnimationFrame(requestVisibleThumbs);
     return;
   }
@@ -2271,7 +2282,7 @@ function setupThumbLazyLoading() {
       if (Number.isFinite(page)) pages.push(page);
     });
     requestThumbPages(pages, true);
-  }, { root: strip, rootMargin: '220px 700px', threshold: 0.01 });
+  }, { root: strip, rootMargin: '180px 320px', threshold: 0.01 });
 
   strip.querySelectorAll('.thumb-item[data-page]').forEach(observeThumbItem);
   requestAnimationFrame(requestVisibleThumbs);
@@ -2296,7 +2307,7 @@ function renderDocumentThumbs(thumbs, pages) {
   }
   strip.appendChild(fragment);
   setupThumbLazyLoading();
-  requestThumbWindow(currentDocument.page, 18);
+  requestThumbWindow(currentDocument.page, 8);
   requestAnimationFrame(scrollActiveThumbIntoView);
 }
 
@@ -2311,6 +2322,8 @@ function applyThumbImages(thumbs) {
     const img = document.createElement('img');
     img.className = 'thumb-img';
     img.alt = `Страница ${page}`;
+    img.decoding = 'async';
+    img.loading = 'lazy';
     img.src = thumb.image;
     frame.insertBefore(img, frame.firstChild);
     item.dataset.thumbLoaded = '1';
@@ -2504,7 +2517,7 @@ function goToPage(page) {
   currentDocument.page = next;
   setActiveThumb(next);
   updatePageChrome(next, currentDocument.pages, currentDocument.color, currentDocument.name);
-  requestThumbWindow(next, 12);
+  requestThumbWindow(next, 6);
   requestAnimationFrame(scrollActiveThumbIntoView);
   if (window.crystalUI?.bridge) window.crystalUI.bridge.renderPage(next);
 }
@@ -2885,7 +2898,7 @@ window.crystalUI = {
     applyThumbImages(thumbs || []);
     primeLoadedThumbStateFromDom();
     setupThumbLazyLoading();
-    requestThumbWindow(currentDocument.page, 18);
+    requestThumbWindow(currentDocument.page, 8);
     applyActionLocks();
   },
   updateThumbImages(thumbs) {

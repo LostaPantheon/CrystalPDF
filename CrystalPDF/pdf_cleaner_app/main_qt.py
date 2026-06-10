@@ -42,9 +42,14 @@ APP_NAME = "CrystalPDF"
 APP_VERSION = "v2.0.0"
 APP_TITLE = f"{APP_NAME} {APP_VERSION}"
 DEFAULT_DPI = 300
-INITIAL_THUMB_BEFORE = 8
-INITIAL_THUMB_AFTER = 30
-THUMB_BATCH_SIZE = 36
+PREVIEW_MAX_WIDTH = 980
+PREVIEW_MAX_HEIGHT = 1320
+THUMB_MAX_WIDTH = 120
+THUMB_MAX_HEIGHT = 170
+INITIAL_THUMB_BEFORE = 4
+INITIAL_THUMB_AFTER = 8
+THUMB_BATCH_SIZE = 12
+THUMB_QUEUE_LIMIT = 96
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".jfif", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
 ADD_PAGE_FILE_FILTER = (
     "PDF и изображения (*.pdf *.png *.jpg *.jpeg *.jfif *.tif *.tiff *.bmp *.webp *.gif);;"
@@ -343,7 +348,7 @@ def thumbnail_payload(doc: fitz.Document, pages: list[int] | set[int] | tuple[in
             thumbs.append(
                 {
                     "page": page_number,
-                    "image": page_png_data_url(doc.load_page(page_number - 1), 120, 170),
+                    "image": page_png_data_url(doc.load_page(page_number - 1), THUMB_MAX_WIDTH, THUMB_MAX_HEIGHT),
                 }
             )
         except Exception:
@@ -357,7 +362,7 @@ def document_preview_payload(doc: fitz.Document, preview_page: int = 1) -> tuple
         return "", []
 
     preview_index = max(0, min(int(preview_page or 1) - 1, total - 1))
-    preview = page_png_data_url(doc.load_page(preview_index), 980, 1320)
+    preview = page_png_data_url(doc.load_page(preview_index), PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
     return preview, thumbnail_payload(doc, initial_thumb_pages(preview_page, total))
 
 
@@ -1028,7 +1033,11 @@ class PdfPartialRefreshWorker(QThread):
                 page_count = len(doc)
                 page_number = max(1, min(int(self.page_number or 1), max(1, page_count)))
                 if page_count > 0:
-                    preview = page_png_data_url(doc.load_page(page_number - 1), 980, 1320)
+                    preview = page_png_data_url(
+                        doc.load_page(page_number - 1),
+                        PREVIEW_MAX_WIDTH,
+                        PREVIEW_MAX_HEIGHT,
+                    )
                     thumbs = thumbnail_payload(doc, self.thumb_pages)
             finally:
                 doc.close()
@@ -1283,7 +1292,7 @@ class CrystalPdfQtApp(QMainWindow):
             return
 
         existing = [page for page in self.pending_thumb_pages if page not in seen]
-        self.pending_thumb_pages = pages + existing
+        self.pending_thumb_pages = (pages + existing)[:THUMB_QUEUE_LIMIT]
         self.start_next_thumb_worker()
 
     def start_next_thumb_worker(self) -> None:
@@ -1735,7 +1744,11 @@ class CrystalPdfQtApp(QMainWindow):
                 if len(doc) <= 0:
                     return
                 page_number = max(1, min(page_number, len(doc)))
-                preview = page_png_data_url(doc.load_page(page_number - 1), 980, 1320)
+                preview = page_png_data_url(
+                    doc.load_page(page_number - 1),
+                    PREVIEW_MAX_WIDTH,
+                    PREVIEW_MAX_HEIGHT,
+                )
             finally:
                 doc.close()
         except Exception as exc:
