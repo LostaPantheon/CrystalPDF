@@ -17,7 +17,7 @@ from uuid import uuid4
 import cv2
 import fitz
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWebChannel import QWebChannel
@@ -45,7 +45,13 @@ DEFAULT_DPI = 300
 INITIAL_THUMB_BEFORE = 8
 INITIAL_THUMB_AFTER = 30
 THUMB_BATCH_SIZE = 36
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".jfif", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
+ADD_PAGE_FILE_FILTER = (
+    "PDF и изображения (*.pdf *.png *.jpg *.jpeg *.jfif *.tif *.tiff *.bmp *.webp *.gif);;"
+    "PDF (*.pdf);;"
+    "Изображения (*.png *.jpg *.jpeg *.jfif *.tif *.tiff *.bmp *.webp *.gif);;"
+    "Все файлы (*.*)"
+)
 DESKTOP_SHORTCUT_NAME = APP_TITLE
 CLEAN_PROGRESS_RE = re.compile(
     r"Стр\.\s*(\d+)\s*/\s*\d+\s*·\s*(.+)",
@@ -637,6 +643,67 @@ def insert_pil_page(
     page.insert_image(page.rect, stream=stream)
 
 
+def image_to_rgb_page(src: Image.Image) -> Image.Image:
+    if src.mode in {"RGBA", "LA"} or "transparency" in src.info:
+        rgba = src.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return src.convert("RGB")
+
+
+def insert_image_file_page(target: fitz.Document, image_path: Path, options: UiOptions) -> None:
+    with Image.open(image_path) as src:
+        image = image_to_rgb_page(ImageOps.exif_transpose(src))
+    insert_pil_page(
+        target,
+        image_page_rect(image),
+        image,
+        options,
+        color=pil_image_has_color(image),
+        compress=False,
+    )
+
+
+def append_pdf_or_image_pages(target: fitz.Document, path: Path, options: UiOptions) -> int:
+    if path.suffix.lower() == ".pdf":
+        source = fitz.open(str(path))
+        try:
+            page_count = len(source)
+            if page_count <= 0:
+                raise RuntimeError(f"PDF не содержит страниц: {path.name}")
+            target.insert_pdf(source)
+            return page_count
+        finally:
+            source.close()
+
+    try:
+        insert_image_file_page(target, path, options)
+        return 1
+    except Exception as exc:
+        raise RuntimeError(f"Файл не похож на PDF или изображение: {path.name}") from exc
+
+
+def merge_page_images(first: Image.Image, second: Image.Image) -> Image.Image:
+    first_rgb = first.convert("RGB")
+    second_rgb = second.convert("RGB")
+    w1, h1 = first_rgb.size
+    w2, h2 = second_rgb.size
+    height_delta = abs(h1 - h2) / max(h1, h2, 1)
+    width_delta = abs(w1 - w2) / max(w1, w2, 1)
+
+    if height_delta <= width_delta:
+        canvas = Image.new("RGB", (w1 + w2, max(h1, h2)), (255, 255, 255))
+        canvas.paste(first_rgb, (0, 0))
+        canvas.paste(second_rgb, (w1, 0))
+        return canvas
+
+    canvas = Image.new("RGB", (max(w1, w2), h1 + h2), (255, 255, 255))
+    canvas.paste(first_rgb, (0, 0))
+    canvas.paste(second_rgb, (0, h1))
+    return canvas
+
+
 def insert_edited_pages(
     target: fitz.Document,
     image: Image.Image,
@@ -1015,6 +1082,10 @@ class Bridge(QObject):
     @Slot(int, str)
     def applySplitCrop(self, page: int, payload: str):
         self.window.apply_split_crop_current_page(page, payload)
+
+    @Slot()
+    def mergeSplitPages(self):
+        self.window.merge_split_pages()
 
     @Slot(int)
     def rotateCurrentPage(self, degrees: int):
@@ -1703,39 +1774,51 @@ class CrystalPdfQtApp(QMainWindow):
     def add_pdf_pages(self) -> None:
         if self.is_busy():
             return
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Добавить страницы из PDF",
+            "Добавить страницы из PDF или изображений",
             str(Path.home()),
-            "PDF (*.pdf)",
+            ADD_PAGE_FILE_FILTER,
         )
-        if not path:
+        if not paths:
             return
-        incoming = Path(path)
-        if not self.input_path:
-            self.load_pdf(incoming)
+        incoming_paths = [Path(path) for path in paths]
+        first_incoming = incoming_paths[0]
+
+        if not self.input_path and len(incoming_paths) == 1 and first_incoming.suffix.lower() == ".pdf":
+            self.load_pdf(first_incoming)
             return
 
-        output = unique_output_path(downloads_dir() / f"{self.input_path.stem}_plus_{incoming.stem}_CrystalPDF.pdf")
+        base_stem = (self.input_path or first_incoming).stem
+        output = unique_output_path(downloads_dir() / f"{base_stem}_plus_pages_CrystalPDF.pdf")
         try:
-            source = fitz.open(str(self.input_path))
-            added = fitz.open(str(incoming))
             result = fitz.open()
             try:
-                result.insert_pdf(source)
+                if self.input_path:
+                    source = fitz.open(str(self.input_path))
+                    try:
+                        result.insert_pdf(source)
+                    finally:
+                        source.close()
                 first_added_page = len(result) + 1
-                result.insert_pdf(added)
+                added_pages = 0
+                for incoming in incoming_paths:
+                    added_pages += append_pdf_or_image_pages(result, incoming, self.options)
+                if added_pages <= 0:
+                    raise RuntimeError("Не выбраны страницы для добавления.")
                 result.save(str(output), garbage=4, deflate=True, clean=True)
             finally:
                 result.close()
-                added.close()
-                source.close()
         except Exception as exc:
-            QMessageBox.critical(self, APP_TITLE, f"Не удалось добавить страницы: {exc}")
+            QMessageBox.critical(self, APP_TITLE, f"Не удалось добавить страницы или изображения: {exc}")
             return
 
         self.load_pdf(output, first_added_page)
-        self.ui_call("setProgress", 100, f"Добавлены страницы: {incoming.name}")
+        if len(incoming_paths) == 1:
+            label = incoming_paths[0].name
+        else:
+            label = f"{len(incoming_paths)} файлов"
+        self.ui_call("setProgress", 100, f"Добавлены страницы: {label}")
 
     def delete_current_page(self) -> None:
         if self.is_busy():
@@ -1768,6 +1851,90 @@ class CrystalPdfQtApp(QMainWindow):
         next_page = min(deleted_page, self.page_count - 1)
         self.load_pdf(output, next_page)
         self.ui_call("setProgress", 100, f"Удалена страница {deleted_page}")
+
+    def choose_merge_pair(self) -> tuple[int, int] | None:
+        if self.page_count < 2:
+            QMessageBox.information(self, APP_TITLE, "Для склейки нужны минимум две страницы.")
+            return None
+
+        current = max(1, min(self.current_page, self.page_count))
+        if current == 1:
+            return 1, 2
+        if current == self.page_count:
+            return self.page_count - 1, self.page_count
+
+        box = QMessageBox(self)
+        box.setWindowTitle(APP_TITLE)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("С какой соседней страницей склеить текущую?")
+        previous_button = box.addButton("С предыдущей", QMessageBox.ButtonRole.AcceptRole)
+        next_button = box.addButton("Со следующей", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == previous_button:
+            return current - 1, current
+        if clicked == next_button:
+            return current, current + 1
+        return None
+
+    def merge_split_pages(self) -> None:
+        if self.is_busy():
+            return
+        if not self.input_path:
+            QMessageBox.information(self, APP_TITLE, "Сначала импортируйте PDF.")
+            return
+
+        pair = self.choose_merge_pair()
+        if not pair:
+            return
+        first_page, second_page = pair
+        output = unique_output_path(
+            downloads_dir() / f"{self.input_path.stem}_merged_pages_{first_page}_{second_page}_CrystalPDF.pdf"
+        )
+
+        self.ui_call("setProcessing", True, "Склейка страниц")
+        self.ui_call("setProgress", 0, f"Склейка страниц {first_page} и {second_page}")
+        self.ui_call("setStatus", "◉ Склейка страниц", "working")
+
+        try:
+            source = fitz.open(str(self.input_path))
+            result = fitz.open()
+            try:
+                if len(source) < 2:
+                    raise RuntimeError("В PDF меньше двух страниц.")
+                first_index = first_page - 1
+                second_index = second_page - 1
+                for idx in range(len(source)):
+                    if idx == first_index:
+                        first_img = render_page_rgb(source.load_page(first_index), DEFAULT_DPI)
+                        second_img = render_page_rgb(source.load_page(second_index), DEFAULT_DPI)
+                        merged = merge_page_images(first_img, second_img)
+                        insert_pil_page(
+                            result,
+                            image_page_rect(merged),
+                            merged,
+                            self.options,
+                            color=pil_image_has_color(merged),
+                            compress=False,
+                        )
+                    elif idx == second_index:
+                        continue
+                    else:
+                        result.insert_pdf(source, from_page=idx, to_page=idx)
+                result.save(str(output), garbage=4, deflate=True, clean=True)
+            finally:
+                result.close()
+                source.close()
+        except Exception as exc:
+            self.ui_call("setProcessing", False)
+            self.ui_call("setStatus", "✗ Ошибка", "error")
+            QMessageBox.critical(self, APP_TITLE, f"Не удалось склеить страницы: {exc}")
+            return
+
+        self.load_pdf(output, first_page)
+        self.ui_call("setProgress", 100, f"Склеены страницы {first_page} и {second_page}")
 
     def apply_split_crop_current_page(self, page_number: int = 0, payload: str = "") -> None:
         if self.is_busy():

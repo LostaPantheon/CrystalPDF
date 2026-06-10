@@ -195,6 +195,17 @@ body::after{
 .btn-a:hover{background:rgba(255,190,61,.14);border-color:rgba(255,190,61,.48)}
 .btn-r{background:var(--rdd);border-color:rgba(255,95,126,.28);color:var(--rd)}
 .btn-r:hover{background:rgba(255,95,126,.14);border-color:rgba(255,95,126,.48)}
+.btn.is-active{
+  background:rgba(255,190,61,.15);
+  border-color:rgba(255,190,61,.58);
+  color:var(--ab);
+  box-shadow:0 0 24px rgba(255,190,61,.14),inset 0 1px 0 rgba(255,255,255,.06);
+}
+.btn.is-active:hover{
+  background:rgba(255,190,61,.20);
+  border-color:rgba(255,190,61,.72);
+  color:var(--ab);
+}
 .line-crop-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-bottom:6px}
 .line-crop-row .btn{margin-bottom:0;padding:8px 8px;font-size:11px}
 .line-crop-row .btn-crop-line{width:auto;min-width:76px;padding:8px 10px}
@@ -439,11 +450,22 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   display:block;
   background:#fff;
 }
+.page-inner.is-skip-marked{
+  box-shadow:inset 0 0 0 4px rgba(255,190,61,.38),inset 0 0 36px rgba(255,190,61,.08);
+}
 .page-preview-img{
   position:absolute;left:0;top:0;display:block;width:100%;height:100%;object-fit:fill;background:#fff;
 }
 .page-edit-layer{position:absolute;inset:0;z-index:4;pointer-events:none}
 .tool-overlay{position:absolute;pointer-events:none;z-index:2}
+.page-skip-badge{
+  position:absolute;top:12px;left:12px;z-index:10;pointer-events:none;
+  padding:7px 10px;border-radius:999px;
+  background:rgba(255,190,61,.92);color:#2c1b00;
+  border:1px solid rgba(255,255,255,.72);
+  font-family:var(--mono);font-size:10px;font-weight:900;letter-spacing:.8px;
+  box-shadow:0 8px 28px rgba(255,190,61,.30),0 1px 0 rgba(255,255,255,.35) inset;
+}
 .overlay-eraser{
   border-radius:50%;background:#fff;
   border:0;
@@ -561,6 +583,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
   box-shadow:0 2px 10px rgba(0,0,0,.35);
 }
 .thumb-item:hover .thumb-frame{border-color:rgba(255,255,255,.22)}
+.thumb-item.skip:not(.on) .thumb-frame{border-color:rgba(255,190,61,.50);box-shadow:0 0 16px rgba(255,190,61,.16),0 2px 10px rgba(0,0,0,.35)}
 .thumb-item.on .thumb-frame{border-color:var(--c0);box-shadow:0 0 20px rgba(0,229,255,.38),0 2px 10px rgba(0,0,0,.35)}
 .thumb-lines{padding:5px 4px;display:flex;flex-direction:column;gap:2.5px}
 .tl{height:4px;background:#dedede;border-radius:1px}
@@ -578,6 +601,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
 .td-skip{background:var(--ab);box-shadow:0 0 6px rgba(255,190,61,.5)}
 .td-err{background:var(--rd)}
 .thumb-num{text-align:center;font-family:var(--mono);font-size:9px;color:var(--t2);margin-top:3px}
+.thumb-num.skip{color:var(--ab);font-weight:800}
 .clr-bar{position:absolute;bottom:0;left:0;right:0;height:3px;background:var(--ab);opacity:.65}
 
 /* ── Page nav ── */
@@ -816,7 +840,8 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <button class="btn btn-a" data-tour="split-horizontal" data-action="split-horizontal">↕&nbsp; Верх/низ</button>
             <button class="btn btn-r btn-crop-line" data-tour="split-apply" data-action="apply-split-crop">✂&nbsp; Обрезать</button>
           </div>
-          <button class="btn btn-ghost">☐&nbsp; Не чистить стр.</button>
+          <button class="btn btn-ghost" data-action="merge-split-pages">⇔&nbsp; Склеить половинки</button>
+          <button class="btn btn-ghost" data-action="skip-page" aria-pressed="false">☐&nbsp; Не чистить стр.</button>
           <button class="btn btn-ghost">□&nbsp; Снять защиту области</button>
           <button class="btn btn-g">↓&nbsp; Скачать текущую</button>
           <button class="btn btn-r">−&nbsp; Удалить текущую</button>
@@ -1512,6 +1537,12 @@ function renderOverlays() {
   const state = getPageState();
   const crop = [...state.overlays].reverse().find(overlay => overlay.type === 'crop');
   renderEdgeZone(layer);
+  if (state.skip) {
+    const badge = document.createElement('div');
+    badge.className = 'page-skip-badge';
+    badge.textContent = 'НЕ ЧИСТИТЬ';
+    layer.appendChild(badge);
+  }
   const drawOverlay = (overlay, index) => {
     const el = document.createElement('div');
     el.className = `tool-overlay overlay-${overlay.type}`;
@@ -1615,6 +1646,7 @@ function applyPageState() {
   }
   applyPreviewFilters();
   renderOverlays();
+  syncSkipUi();
 }
 
 function scheduleApplyPageState() {
@@ -1633,15 +1665,21 @@ function clearPageState() {
   pushUndo({ type: 'state', page: key, previous, next: JSON.parse(JSON.stringify(getPageState())) });
   setEdits(currentDocument.edits + 1);
   applyPageState();
+  setThumbStatus(currentDocument.page, pageThumbStatus(currentDocument.page));
   syncPageEdits(key);
   window.crystalUI?.setStatus('● Страница сброшена', 'ready');
 }
 
 function setPageSkip(active) {
   const state = getPageState();
-  state.skip = typeof active === 'boolean' ? active : !state.skip;
+  const previous = cloneState(state);
+  const next = typeof active === 'boolean' ? active : !state.skip;
+  if (state.skip === next) return;
+  state.skip = next;
+  pushUndo({ type: 'state', page: pageKey(), previous, next: cloneState(state) });
   setEdits(currentDocument.edits + 1);
   setThumbStatus(currentDocument.page, state.skip ? 'skip' : 'wait');
+  applyPageState();
   syncPageEdits();
   window.crystalUI?.setStatus(state.skip ? '● Страница помечена: не чистить' : '● Страница снова в очереди', 'ready');
 }
@@ -1898,6 +1936,45 @@ function pageThumbStatus(page) {
   return state?.skip ? 'skip' : 'wait';
 }
 
+function skipPageButtons() {
+  return Array.from(document.querySelectorAll('[data-action="skip-page"], .btn')).filter(btn =>
+    btn.dataset.action === 'skip-page' || buttonTextHas(btn, ['Не чистить'])
+  );
+}
+
+function setSkipButtonState(active) {
+  skipPageButtons().forEach(btn => {
+    btn.classList.toggle('is-active', !!active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    btn.innerHTML = active ? '☑&nbsp; Не чистить: включено' : '☐&nbsp; Не чистить стр.';
+    btn.title = active ? 'Страница помечена: очистка будет пропущена' : 'Пометить текущую страницу без очистки';
+  });
+}
+
+function updateThumbSkipMarker(page, skipped) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const item = document.querySelector(`.thumb-item[data-page="${safePage}"]`);
+  if (!item) return;
+  const active = !!skipped;
+  item.classList.toggle('skip', active);
+  const num = item.querySelector('.thumb-num');
+  if (num) {
+    num.classList.toggle('skip', active);
+    num.textContent = active ? `${safePage} НЕ` : String(safePage);
+  }
+}
+
+function syncSkipUi(page=currentDocument.page) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const skipped = pageThumbStatus(safePage) === 'skip';
+  updateThumbSkipMarker(safePage, skipped);
+  if (safePage === Math.max(1, Number(currentDocument.page) || 1)) {
+    setSkipButtonState(skipped);
+    const inner = document.querySelector('.page-inner');
+    if (inner) inner.classList.toggle('is-skip-marked', skipped);
+  }
+}
+
 function setThumbStatus(page, status) {
   const item = document.querySelector(`.thumb-item[data-page="${Number(page)}"]`);
   if (!item) return;
@@ -1910,6 +1987,7 @@ function setThumbStatus(page, status) {
     frame.appendChild(dot);
   }
   dot.className = `thumb-dot ${thumbStatusClass(status)}`;
+  syncSkipUi(page);
 }
 
 function resetThumbStatuses() {
@@ -2025,8 +2103,9 @@ function resetThumbLazyState() {
 }
 
 function createThumbItem(page, image='') {
+  const skipped = pageThumbStatus(page) === 'skip';
   const item = document.createElement('div');
-  item.className = 'thumb-item' + (page === currentDocument.page ? ' on' : '');
+  item.className = 'thumb-item' + (page === currentDocument.page ? ' on' : '') + (skipped ? ' skip' : '');
   item.dataset.page = String(page);
 
   const frame = document.createElement('div');
@@ -2051,8 +2130,8 @@ function createThumbItem(page, image='') {
   frame.appendChild(dot);
 
   const num = document.createElement('div');
-  num.className = 'thumb-num';
-  num.textContent = String(page);
+  num.className = 'thumb-num' + (skipped ? ' skip' : '');
+  num.textContent = skipped ? `${page} НЕ` : String(page);
 
   item.appendChild(frame);
   item.appendChild(num);
@@ -2372,6 +2451,8 @@ function undoAction() {
     setEdits(currentDocument.edits - 1);
   }
   applyPageState();
+  setThumbStatus(Number(action.page), pageThumbStatus(action.page));
+  syncSkipUi(action.page);
   syncPageEdits(Number(action.page));
 }
 
@@ -2389,6 +2470,8 @@ function redoAction() {
     setEdits(currentDocument.edits + 1);
   }
   applyPageState();
+  setThumbStatus(Number(action.page), pageThumbStatus(action.page));
+  syncSkipUi(action.page);
   syncPageEdits(Number(action.page));
 }
 
@@ -2797,6 +2880,12 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
         const payload = JSON.stringify(serializablePageState(page));
         if (bridge.applySplitCrop) bridge.applySplitCrop(page, payload);
       });
+      else if (action === 'merge-split-pages') btn.addEventListener('click', () => {
+        if (btn.disabled || processingActive) return;
+        syncAllPageEdits();
+        if (bridge.mergeSplitPages) bridge.mergeSplitPages();
+      });
+      else if (action === 'skip-page') btn.addEventListener('click', () => setPageSkip());
       else if (text.includes('Импорт PDF')) btn.addEventListener('click', () => bridge.importPdf());
       else if (text.includes('Экспорт PDF')) btn.addEventListener('click', () => {
         if (btn.disabled) return;
