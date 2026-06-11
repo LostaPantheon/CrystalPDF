@@ -206,9 +206,9 @@ body::after{
   border-color:rgba(255,190,61,.72);
   color:var(--ab);
 }
-.line-crop-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;margin-bottom:6px}
+.line-crop-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px}
 .line-crop-row .btn{margin-bottom:0;padding:8px 8px;font-size:11px}
-.line-crop-row .btn-crop-line{width:auto;min-width:76px;padding:8px 10px}
+.line-crop-row .btn-crop-line,.line-crop-row .btn-clear-split{padding:8px 10px}
 .btn-v{background:linear-gradient(135deg,rgba(157,123,255,.1),rgba(244,114,182,.06));border-color:rgba(157,123,255,.3);color:var(--vi)}
 .btn-v:hover{background:rgba(157,123,255,.18);border-color:rgba(157,123,255,.5)}
 .btn:disabled,.btn.is-locked,.cancel-btn:disabled{
@@ -839,6 +839,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
             <button class="btn btn-a" data-tour="split-vertical" data-action="split-vertical">↔&nbsp; Лев/прав</button>
             <button class="btn btn-a" data-tour="split-horizontal" data-action="split-horizontal">↕&nbsp; Верх/низ</button>
             <button class="btn btn-r btn-crop-line" data-tour="split-apply" data-action="apply-split-crop">✂&nbsp; Обрезать</button>
+            <button class="btn btn-ghost btn-clear-split" data-action="clear-split-line">×&nbsp; Убрать</button>
           </div>
           <button class="btn btn-ghost" data-action="merge-split-pages">⇔&nbsp; Склеить половинки</button>
           <button class="btn btn-ghost" data-action="skip-page" aria-pressed="false">☐&nbsp; Не чистить стр.</button>
@@ -1810,6 +1811,23 @@ function setSplitLine(orientation, position=50, pushHistory=true) {
     syncPageEdits();
   }
   applyPageState();
+}
+
+function clearSplitLine() {
+  const state = getPageState();
+  const previous = cloneState(state);
+  const before = state.overlays.length;
+  state.overlays = state.overlays.filter(overlay => overlay.type !== 'split');
+  if (state.overlays.length === before) {
+    window.crystalUI?.setStatus('● Линия разделения уже убрана', 'ready');
+    return;
+  }
+  pushUndo({ type: 'state', page: pageKey(), previous, next: cloneState(state) });
+  setEdits(currentDocument.edits + 1);
+  applyPageState();
+  setTool('pan');
+  syncPageEdits();
+  window.crystalUI?.setStatus('● Линия разделения убрана', 'ready');
 }
 
 function updateSplitLineFromPoint(point, orientation=splitOrientationFromTool()) {
@@ -2972,6 +2990,10 @@ if (window.CRYSTAL_NATIVE && window.QWebChannel) {
         const page = Number(currentDocument.page) || 1;
         const payload = JSON.stringify(serializablePageState(page));
         if (bridge.applySplitCrop) bridge.applySplitCrop(page, payload);
+      });
+      else if (action === 'clear-split-line') btn.addEventListener('click', () => {
+        if (btn.disabled || processingActive) return;
+        clearSplitLine();
       });
       else if (action === 'merge-split-pages') btn.addEventListener('click', () => {
         if (btn.disabled || processingActive) return;
