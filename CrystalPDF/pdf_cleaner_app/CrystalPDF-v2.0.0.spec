@@ -55,8 +55,6 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
     name='CrystalPDF-v2.0.0',
     debug=False,
@@ -72,4 +70,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['icon.ico'],
+    exclude_binaries=True,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=['Qt*.dll', 'PySide6*.dll', 'vcruntime*.dll', 'msvcp*.dll'],
+    name='CrystalPDF-v2.0.0',
 )

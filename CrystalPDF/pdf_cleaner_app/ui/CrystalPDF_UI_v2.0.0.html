@@ -974,7 +974,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
       <div class="tb-sep" style="margin:0 8px"></div>
       <span style="font-size:10px;color:var(--ab);font-family:var(--mono)">RGB — цвет</span>
       <div class="tb-sep" style="margin:0 8px"></div>
-      <span style="font-size:10px;color:var(--c0);font-family:var(--mono)">300 dpi</span>
+      <span style="font-size:10px;color:var(--c0);font-family:var(--mono)">220 dpi</span>
     </div>
     <div class="page-outer">
       <div class="page-inner">
@@ -998,7 +998,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
         <div class="clr-stripe"></div>
         <div class="rot-badge">0°</div>
       </div>
-      <div class="page-lbl">Страница 3 · RGB · 300 dpi</div>
+      <div class="page-lbl">Страница 3 · RGB · 220 dpi</div>
     </div>
   </div>
 
@@ -1041,7 +1041,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 0 5px rgba(0,229,25
     <span class="st-ok">● Готов к работе</span>
     <span class="st-pill st-ab">✏ 7 правок</span>
     <span class="st-pill st-gn">🎨 4 цветных стр.</span>
-    <span class="st-ml">22 стр. · 300 dpi · ⚡ Стандартная</span>
+    <span class="st-ml">22 стр. · 220 dpi · ⚡ Стандартная</span>
   </div>
 
 </main>
@@ -1258,8 +1258,9 @@ const redoStack = [];
 const loadedThumbPages = new Set();
 const requestedThumbPages = new Map();
 const queuedThumbPages = new Set();
-const THUMB_REQUEST_BATCH = 12;
-const THUMB_QUEUE_LIMIT = 96;
+const THUMB_REQUEST_BATCH = 3;
+const THUMB_QUEUE_LIMIT = 18;
+const THUMB_CACHE_RADIUS = 10;
 const THUMB_REQUEST_RETRY_MS = 4500;
 
 function buttonTextHas(btn, values) {
@@ -2045,7 +2046,7 @@ function updatePageChrome(page, pages, color, name) {
     toolSpans[1].textContent = color > 0 ? 'PDF · цвет найден' : 'PDF · ч/б';
     toolSpans[1].style.color = color > 0 ? 'var(--ab)' : 'var(--t1)';
   }
-  if (toolSpans[2]) toolSpans[2].textContent = '300 dpi';
+  if (toolSpans[2]) toolSpans[2].textContent = '220 dpi';
 
   const pageLabel = document.querySelector('.page-lbl');
   if (pageLabel) pageLabel.textContent = safePages ? `Страница ${safePage} · ${name || 'PDF'}` : 'Откройте PDF';
@@ -2097,7 +2098,7 @@ function showPagePreview(page, pages, color, name, preview) {
   inner.appendChild(layer);
   updatePageChrome(currentDocument.page, currentDocument.pages, currentDocument.color, currentDocument.name);
   setActiveThumb(currentDocument.page);
-  requestThumbWindow(currentDocument.page, 6);
+  requestThumbWindow(currentDocument.page, 2);
   applyPageState();
 }
 
@@ -2148,6 +2149,38 @@ function primeLoadedThumbStateFromDom() {
   });
 }
 
+function unloadThumbImage(item) {
+  const page = Number(item?.dataset?.page);
+  const frame = item?.querySelector('.thumb-frame');
+  const img = frame?.querySelector('.thumb-img');
+  if (!Number.isFinite(page) || !frame || !img) return;
+  img.removeAttribute('src');
+  img.remove();
+  if (!frame.querySelector('.thumb-lines')) {
+    const lines = document.createElement('div');
+    lines.className = 'thumb-lines';
+    lines.innerHTML = thumbPlaceholderHtml(page);
+    frame.insertBefore(lines, frame.firstChild);
+  }
+  delete item.dataset.thumbLoaded;
+  loadedThumbPages.delete(page);
+  requestedThumbPages.delete(page);
+  if (thumbObserver) thumbObserver.observe(item);
+}
+
+function unloadDistantThumbImages(centerPage=currentDocument.page) {
+  const strip = document.querySelector('.thumb-strip');
+  if (!strip) return;
+  const center = Math.max(1, Number(centerPage) || 1);
+  const visible = new Set(visibleThumbPages());
+  document.querySelectorAll('.thumb-item[data-page]').forEach(item => {
+    const page = Number(item.dataset.page);
+    if (!Number.isFinite(page) || !item.querySelector('.thumb-img')) return;
+    if (page === center || Math.abs(page - center) <= THUMB_CACHE_RADIUS || visible.has(page)) return;
+    unloadThumbImage(item);
+  });
+}
+
 function createThumbItem(page, image='') {
   const skipped = pageThumbStatus(page) === 'skip';
   const item = document.createElement('div');
@@ -2185,7 +2218,7 @@ function createThumbItem(page, image='') {
   item.appendChild(num);
   item.addEventListener('click', () => {
     goToPage(page);
-    requestThumbWindow(page, 6);
+    requestThumbWindow(page, 2);
   });
   return item;
 }
@@ -2249,8 +2282,8 @@ function requestThumbWindow(centerPage=currentDocument.page, radius=18) {
 function visibleThumbPages() {
   const strip = document.querySelector('.thumb-strip');
   if (!strip) return [];
-  const left = strip.scrollLeft - strip.clientWidth * 1.5;
-  const right = strip.scrollLeft + strip.clientWidth * 2.5;
+  const left = strip.scrollLeft - strip.clientWidth * 0.5;
+  const right = strip.scrollLeft + strip.clientWidth * 1.5;
   const pages = [];
   strip.querySelectorAll('.thumb-item[data-page]').forEach(item => {
     const itemLeft = item.offsetLeft;
@@ -2264,6 +2297,7 @@ function visibleThumbPages() {
 
 function requestVisibleThumbs() {
   requestThumbPages(visibleThumbPages(), true);
+  unloadDistantThumbImages();
 }
 
 function scheduleVisibleThumbRequest() {
@@ -2288,7 +2322,7 @@ function setupThumbLazyLoading() {
     strip.addEventListener('scroll', scheduleVisibleThumbRequest, { passive: true });
   }
   if (!('IntersectionObserver' in window)) {
-    requestThumbWindow(currentDocument.page, 12);
+    requestThumbWindow(currentDocument.page, 4);
     requestAnimationFrame(requestVisibleThumbs);
     return;
   }
@@ -2300,7 +2334,7 @@ function setupThumbLazyLoading() {
       if (Number.isFinite(page)) pages.push(page);
     });
     requestThumbPages(pages, true);
-  }, { root: strip, rootMargin: '180px 320px', threshold: 0.01 });
+  }, { root: strip, rootMargin: '80px 140px', threshold: 0.01 });
 
   strip.querySelectorAll('.thumb-item[data-page]').forEach(observeThumbItem);
   requestAnimationFrame(requestVisibleThumbs);
@@ -2325,7 +2359,7 @@ function renderDocumentThumbs(thumbs, pages) {
   }
   strip.appendChild(fragment);
   setupThumbLazyLoading();
-  requestThumbWindow(currentDocument.page, 8);
+  requestThumbWindow(currentDocument.page, 2);
   requestAnimationFrame(scrollActiveThumbIntoView);
 }
 
@@ -2350,6 +2384,7 @@ function applyThumbImages(thumbs) {
     queuedThumbPages.delete(page);
     if (thumbObserver) thumbObserver.unobserve(item);
   });
+  unloadDistantThumbImages();
 }
 
 function pagePoint(event) {
@@ -2535,8 +2570,9 @@ function goToPage(page) {
   currentDocument.page = next;
   setActiveThumb(next);
   updatePageChrome(next, currentDocument.pages, currentDocument.color, currentDocument.name);
-  requestThumbWindow(next, 6);
+  requestThumbWindow(next, 2);
   requestAnimationFrame(scrollActiveThumbIntoView);
+  requestAnimationFrame(() => unloadDistantThumbImages(next));
   if (window.crystalUI?.bridge) window.crystalUI.bridge.renderPage(next);
 }
 
@@ -2885,7 +2921,7 @@ window.crystalUI = {
       if (values[i]) values[i].textContent = String(v ?? 0);
     });
     const ml = document.querySelector('.st-ml');
-    if (ml) ml.textContent = `${pages || 0} стр. · 300 dpi · ⚡ Стандартная`;
+    if (ml) ml.textContent = `${pages || 0} стр. · 220 dpi · ⚡ Стандартная`;
     const colorPill = document.querySelector('.st-gn');
     if (colorPill) colorPill.textContent = `🎨 ${color || 0} цветных стр.`;
     const editsPill = document.querySelector('.st-ab');
@@ -2916,7 +2952,7 @@ window.crystalUI = {
     applyThumbImages(thumbs || []);
     primeLoadedThumbStateFromDom();
     setupThumbLazyLoading();
-    requestThumbWindow(currentDocument.page, 8);
+    requestThumbWindow(currentDocument.page, 2);
     applyActionLocks();
   },
   updateThumbImages(thumbs) {

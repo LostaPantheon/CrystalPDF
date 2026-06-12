@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import gc
 import io
 import json
 import os
@@ -42,15 +43,15 @@ from pdf_cleaner import CleanSettings, clean_page_image, estimate_deskew_angle
 APP_NAME = "CrystalPDF"
 APP_VERSION = "v2.0.0"
 APP_TITLE = f"{APP_NAME} {APP_VERSION}"
-DEFAULT_DPI = 300
-PREVIEW_MAX_WIDTH = 980
-PREVIEW_MAX_HEIGHT = 1320
-THUMB_MAX_WIDTH = 120
-THUMB_MAX_HEIGHT = 170
-INITIAL_THUMB_BEFORE = 4
-INITIAL_THUMB_AFTER = 8
-THUMB_BATCH_SIZE = 12
-THUMB_QUEUE_LIMIT = 96
+DEFAULT_DPI = 220
+PREVIEW_MAX_WIDTH = 760
+PREVIEW_MAX_HEIGHT = 1040
+THUMB_MAX_WIDTH = 88
+THUMB_MAX_HEIGHT = 124
+INITIAL_THUMB_BEFORE = 1
+INITIAL_THUMB_AFTER = 2
+THUMB_BATCH_SIZE = 3
+THUMB_QUEUE_LIMIT = 18
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".jfif", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
 ADD_PAGE_FILE_FILTER = (
     "PDF и изображения (*.pdf *.png *.jpg *.jpeg *.jfif *.tif *.tiff *.bmp *.webp *.gif);;"
@@ -77,6 +78,14 @@ GENERATED_STEM_SUFFIXES = (
     re.compile(r"_clean$", re.IGNORECASE),
     re.compile(r"_CrystalPDF(?:_\d+)?$", re.IGNORECASE),
 )
+
+
+def release_render_memory() -> None:
+    try:
+        fitz.TOOLS.store_shrink(100)
+    except Exception:
+        pass
+    gc.collect()
 
 
 def resource_path(relative: str) -> Path:
@@ -251,7 +260,11 @@ class UiOptions:
 def render_page_rgb(page: fitz.Page, dpi: int) -> Image.Image:
     zoom = dpi / 72.0
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False)
-    return Image.frombytes("RGB", (pix.w, pix.h), pix.samples)
+    try:
+        return Image.frombytes("RGB", (pix.w, pix.h), pix.samples)
+    finally:
+        del pix
+        release_render_memory()
 
 
 def adjust_pil_image(image: Image.Image, brightness: int, contrast: int) -> Image.Image:
@@ -272,28 +285,37 @@ def adjust_pil_image(image: Image.Image, brightness: int, contrast: int) -> Imag
 
 
 def color_text_mask(image: Image.Image) -> np.ndarray:
-    arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
-    arr_i = arr.astype(np.int16)
-    channel_delta = arr_i.max(axis=2) - arr_i.min(axis=2)
-    not_white = arr_i.min(axis=2) < 245
-    saturated = (channel_delta > 18) & not_white
-    if not saturated.any():
-        return saturated
-    kernel = np.ones((2, 2), np.uint8)
-    return cv2.dilate(saturated.astype(np.uint8), kernel, iterations=1).astype(bool)
+    rgb = image if image.mode == "RGB" else image.convert("RGB")
+    try:
+        arr = np.asarray(rgb, dtype=np.uint8)
+        arr_i = arr.astype(np.int16)
+        channel_delta = arr_i.max(axis=2) - arr_i.min(axis=2)
+        not_white = arr_i.min(axis=2) < 245
+        saturated = (channel_delta > 18) & not_white
+        if not saturated.any():
+            return saturated
+        kernel = np.ones((2, 2), np.uint8)
+        return cv2.dilate(saturated.astype(np.uint8), kernel, iterations=1).astype(bool)
+    finally:
+        if rgb is not image:
+            rgb.close()
 
 
 def pil_image_has_color(image: Image.Image, max_pixels: int = 180_000) -> bool:
-    rgb = image.convert("RGB")
-    arr = np.asarray(rgb)
-    pixels = arr.reshape(-1, 3)
-    if pixels.shape[0] > max_pixels:
-        step = max(1, pixels.shape[0] // max_pixels)
-        pixels = pixels[::step]
-    pixels_i = pixels.astype(np.int16)
-    diffs = pixels_i.max(axis=1) - pixels_i.min(axis=1)
-    colored = (diffs > 18) & (pixels_i.min(axis=1) < 245)
-    return bool(np.mean(colored) > 0.003 or np.count_nonzero(colored) > 600)
+    rgb = image if image.mode == "RGB" else image.convert("RGB")
+    try:
+        arr = np.asarray(rgb)
+        pixels = arr.reshape(-1, 3)
+        if pixels.shape[0] > max_pixels:
+            step = max(1, pixels.shape[0] // max_pixels)
+            pixels = pixels[::step]
+        pixels_i = pixels.astype(np.int16)
+        diffs = pixels_i.max(axis=1) - pixels_i.min(axis=1)
+        colored = (diffs > 18) & (pixels_i.min(axis=1) < 245)
+        return bool(np.mean(colored) > 0.003 or np.count_nonzero(colored) > 600)
+    finally:
+        if rgb is not image:
+            rgb.close()
 
 
 def image_stream(image: Image.Image, quality: int, prefer_jpeg: bool) -> tuple[bytes, str]:
@@ -315,8 +337,12 @@ def page_png_data_url(page: fitz.Page, max_width: int, max_height: int) -> str:
     )
     scale = max(0.2, min(scale, 2.0))
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csRGB, alpha=False)
-    png = pix.tobytes("png")
-    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    try:
+        png = pix.tobytes("png")
+        return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    finally:
+        del pix
+        release_render_memory()
 
 
 def initial_thumb_pages(active_page: int, total: int) -> list[int]:
@@ -326,7 +352,7 @@ def initial_thumb_pages(active_page: int, total: int) -> list[int]:
     start = max(1, active - INITIAL_THUMB_BEFORE)
     end = min(total, active + INITIAL_THUMB_AFTER)
     pages = set(range(start, end + 1))
-    pages.update(range(1, min(total, 8) + 1))
+    pages.update(range(1, min(total, 3) + 1))
     pages.add(active)
     return sorted(pages)
 
@@ -344,7 +370,7 @@ def thumbnail_payload(doc: fitz.Document, pages: list[int] | set[int] | tuple[in
         if 1 <= page_number <= total and page_number not in seen_pages:
             requested_pages.append(page_number)
             seen_pages.add(page_number)
-    for page_number in requested_pages:
+    for page_number in requested_pages[:THUMB_BATCH_SIZE]:
         try:
             thumbs.append(
                 {
@@ -450,8 +476,12 @@ def estimate_color_pages_document(doc: fitz.Document) -> int:
     for idx in indices:
         page = doc.load_page(idx)
         img = render_page_rgb(page, 72)
-        if pil_image_has_color(img, max_pixels=60_000):
-            count += 1
+        try:
+            if pil_image_has_color(img, max_pixels=60_000):
+                count += 1
+        finally:
+            img.close()
+            release_render_memory()
     if len(indices) < total:
         count = round(count * total / max(1, len(indices)))
     return count
@@ -584,25 +614,29 @@ def pil_image_has_color_outside_boxes(
     if not boxes:
         return pil_image_has_color(image, max_pixels=max_pixels)
 
-    rgb = image.convert("RGB")
-    arr = np.asarray(rgb)
-    height, width = arr.shape[:2]
-    mask = np.ones((height, width), dtype=bool)
-    for box in boxes:
-        x0, y0, x1, y1 = pct_box_to_px(box, width, height)
-        mask[y0:y1, x0:x1] = False
+    rgb = image if image.mode == "RGB" else image.convert("RGB")
+    try:
+        arr = np.asarray(rgb)
+        height, width = arr.shape[:2]
+        mask = np.ones((height, width), dtype=bool)
+        for box in boxes:
+            x0, y0, x1, y1 = pct_box_to_px(box, width, height)
+            mask[y0:y1, x0:x1] = False
 
-    pixels = arr[mask].reshape(-1, 3)
-    if pixels.shape[0] == 0:
-        return False
-    if pixels.shape[0] > max_pixels:
-        step = max(1, pixels.shape[0] // max_pixels)
-        pixels = pixels[::step]
+        pixels = arr[mask].reshape(-1, 3)
+        if pixels.shape[0] == 0:
+            return False
+        if pixels.shape[0] > max_pixels:
+            step = max(1, pixels.shape[0] // max_pixels)
+            pixels = pixels[::step]
 
-    pixels_i = pixels.astype(np.int16)
-    diffs = pixels_i.max(axis=1) - pixels_i.min(axis=1)
-    colored = (diffs > 18) & (pixels_i.min(axis=1) < 245)
-    return bool(np.mean(colored) > 0.003 or np.count_nonzero(colored) > 600)
+        pixels_i = pixels.astype(np.int16)
+        diffs = pixels_i.max(axis=1) - pixels_i.min(axis=1)
+        colored = (diffs > 18) & (pixels_i.min(axis=1) < 245)
+        return bool(np.mean(colored) > 0.003 or np.count_nonzero(colored) > 600)
+    finally:
+        if rgb is not image:
+            rgb.close()
 
 
 def edited_target_rect(page_rect: fitz.Rect, page_edits: dict[str, object] | None) -> fitz.Rect:
@@ -831,11 +865,16 @@ def clean_pdf_webengine(
             pct = int((idx / max(1, total)) * 100)
 
             page = source.load_page(idx)
+            rgb: Image.Image | None = None
+            out_img: Image.Image | None = None
+            gray: np.ndarray | None = None
+            cleaned: np.ndarray | None = None
             edits = page_edits.get(page_num, {}) if page_edits else {}
             in_clean_range = page_num in clean_pages
             if explicit_clean_range and not in_clean_range and not options.split_pages:
                 target.insert_pdf(source, from_page=idx, to_page=idx)
                 progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · вне диапазона")
+                release_render_memory()
                 continue
 
             skip = (
@@ -863,6 +902,9 @@ def clean_pdf_webengine(
                         processed_count += 1
                         progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · сжатие")
                         progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
+                        rgb.close()
+                        rgb = None
+                        release_render_memory()
                         continue
                 target.insert_pdf(source, from_page=idx, to_page=idx)
                 reason = "вне диапазона" if not in_clean_range else "без очистки"
@@ -885,6 +927,12 @@ def clean_pdf_webengine(
                     auto_split=options.split_pages,
                 )
                 processed_count += 1
+                if out_img is not rgb:
+                    out_img.close()
+                rgb.close()
+                out_img = None
+                rgb = None
+                release_render_memory()
                 progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
                 continue
 
@@ -923,6 +971,15 @@ def clean_pdf_webengine(
                     auto_split=options.split_pages,
                 )
             processed_count += 1
+            if isinstance(out_img, Image.Image) and out_img is not rgb:
+                out_img.close()
+            if isinstance(rgb, Image.Image):
+                rgb.close()
+            gray = None
+            cleaned = None
+            out_img = None
+            rgb = None
+            release_render_memory()
             progress(int((page_num / total) * 100), f"Стр. {page_num}/{total} · готово")
 
         target.save(str(temp_output), garbage=4, deflate=True, clean=True)
