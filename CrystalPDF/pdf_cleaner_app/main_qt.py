@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -1864,6 +1865,33 @@ class CrystalPdfQtApp(QMainWindow):
         self.ui_call("setProgress", 100, f"Страница сохранена: {output.name}")
         self.ui_call("setStatus", "● Страница сохранена", "ready")
 
+    def prompt_add_page_position(self, page_count: int) -> int | None:
+        if page_count <= 0:
+            return 0
+
+        max_page = page_count + 1
+        default_page = max(1, min(self.current_page + 1, max_page))
+        label = (
+            "\u041d\u043e\u043c\u0435\u0440 \u043f\u0435\u0440\u0432\u043e\u0439 "
+            "\u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u043e\u0439 "
+            "\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b (1-{max_page}). "
+            "{end_page} = \u0432 \u043a\u043e\u043d\u0435\u0446."
+        ).format(max_page=max_page, end_page=max_page)
+        page_number, ok = QInputDialog.getInt(
+            self,
+            "\u041a\u0443\u0434\u0430 \u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c "
+            "\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b",
+            label,
+            default_page,
+            1,
+            max_page,
+            1,
+        )
+        if not ok:
+            return None
+
+        return max(0, min(page_number - 1, page_count))
+
     def add_pdf_pages(self) -> None:
         if self.is_busy():
             return
@@ -1882,20 +1910,34 @@ class CrystalPdfQtApp(QMainWindow):
             self.load_pdf(first_incoming)
             return
 
+        source_page_count = max(0, self.page_count if self.input_path else 0)
+        insert_index = self.prompt_add_page_position(source_page_count)
+        if insert_index is None:
+            return
+
         output = unique_output_path(generated_output_path(self.input_path or first_incoming, "plus_pages_CrystalPDF"))
         try:
             result = fitz.open()
             try:
+                added_pages = 0
                 if self.input_path:
                     source = fitz.open(str(self.input_path))
                     try:
-                        result.insert_pdf(source)
+                        source_page_count = len(source)
+                        insert_index = max(0, min(insert_index, source_page_count))
+                        if insert_index > 0:
+                            result.insert_pdf(source, from_page=0, to_page=insert_index - 1)
+                        first_added_page = len(result) + 1
+                        for incoming in incoming_paths:
+                            added_pages += append_pdf_or_image_pages(result, incoming, self.options)
+                        if insert_index < source_page_count:
+                            result.insert_pdf(source, from_page=insert_index, to_page=source_page_count - 1)
                     finally:
                         source.close()
-                first_added_page = len(result) + 1
-                added_pages = 0
-                for incoming in incoming_paths:
-                    added_pages += append_pdf_or_image_pages(result, incoming, self.options)
+                else:
+                    first_added_page = len(result) + 1
+                    for incoming in incoming_paths:
+                        added_pages += append_pdf_or_image_pages(result, incoming, self.options)
                 if added_pages <= 0:
                     raise RuntimeError("Не выбраны страницы для добавления.")
                 result.save(str(output), garbage=4, deflate=True, clean=True)
@@ -1909,8 +1951,16 @@ class CrystalPdfQtApp(QMainWindow):
         if len(incoming_paths) == 1:
             label = incoming_paths[0].name
         else:
-            label = f"{len(incoming_paths)} файлов"
-        self.ui_call("setProgress", 100, f"Добавлены страницы: {label}")
+            label = f"{len(incoming_paths)} \u0444\u0430\u0439\u043b\u043e\u0432"
+        self.ui_call(
+            "setProgress",
+            100,
+            (
+                "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u044b "
+                "\u0441\u0442\u0440\u0430\u043d\u0438\u0446\u044b: {label} "
+                "\xb7 \u0441 {first_page} \u0441\u0442\u0440."
+            ).format(label=label, first_page=first_added_page),
+        )
 
     def delete_current_page(self) -> None:
         if self.is_busy():
